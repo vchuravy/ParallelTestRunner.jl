@@ -4,7 +4,7 @@ using .Distributed, .Test
 
 ## entry point
 
-function runtests(f, name)
+function __runtests(f, name)
     old_print_setting = Test.TESTSET_PRINT_ENABLE[]
     if VERSION < v"1.13.0-DEV.1044"
         Test.TESTSET_PRINT_ENABLE[] = false
@@ -27,7 +27,7 @@ function runtests(f, name)
             Random.seed!(1)
 
             res = @timed @testset $name begin
-                $f()
+                include($f)
             end
             res..., 0, 0, 0
         end

@@ -9,6 +9,8 @@ using Printf: @sprintf
 using Base.Filesystem: path_separator
 import Test
 
+include("setup.jl")
+
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
     const JULIA_TEST_MAXRSS_MB = 3800
@@ -103,10 +105,10 @@ function runtests(ARGS, testfilter = _ -> true)
 
         append!(tests, files)
         for file in files
-            test_runners[file] = () -> include("$WORKDIR/$file.jl")
+            test_runners[file] = joinpath("$WORKDIR", "$file.jl")
         end
     end
-    sort!(tests; by = (file) -> stat("$WORKDIR/$file.jl").size, rev = true)
+    sort!(tests; by = (file) -> stat(joinpath("$WORKDIR", "$file.jl")).size, rev = true)
     ## finalize
     unique!(tests)
 
@@ -294,7 +296,7 @@ function runtests(ARGS, testfilter = _ -> true)
                         # run the test
                         running_tests[test] = now()
                         try
-                            resp = remotecall_fetch(runtests, wrkr, test_runners[test], test)
+                            resp = remotecall_fetch(__runtests, wrkr, test_runners[test], test)
                         catch e
                             isa(e, InterruptException) && return
                             resp = Any[e]
