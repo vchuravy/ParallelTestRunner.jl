@@ -2,17 +2,14 @@ import ParallelTestRunner
 import ParallelTestRunner: Distributed, Test
 using .Distributed, .Test
 
+if VERSION >= v"1.13.0-DEV.1044"
+    using Base.ScopedValues
+end
+
 ## entry point
 
 function __runtests(f, name)
-    old_print_setting = Test.TESTSET_PRINT_ENABLE[]
-    if VERSION < v"1.13.0-DEV.1044"
-        Test.TESTSET_PRINT_ENABLE[] = false
-    else
-        Test.TESTSET_PRINT_ENABLE[] => false
-    end
-
-    return try
+    function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
         mod = @eval(Main, module $mod_name end)
@@ -60,14 +57,23 @@ function __runtests(f, name)
         res = vcat(collect(data), rss)
 
         GC.gc(true)
-        res
-    finally
-        if VERSION < v"1.13.0-DEV.1044"
+        return res
+    end
+
+    res = @static if VERSION >= v"1.13.0-DEV.1044"
+        @with Test.TESTSET_PRINT_ENABLE => false begin
+            inner()
+        end
+    else
+        old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+        Test.TESTSET_PRINT_ENABLE[] = false
+        try
+            inner()
+        finally
             Test.TESTSET_PRINT_ENABLE[] = old_print_setting
-        else
-            Test.TESTSET_PRINT_ENABLE[] => old_print_setting
         end
     end
+    return res
 end
 
 
