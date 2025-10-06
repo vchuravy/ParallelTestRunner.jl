@@ -1,4 +1,6 @@
-using Distributed, Test
+import ParallelTestRunner
+import ParallelTestRunner: Distributed, Test
+using .Distributed, .Test
 
 ## entry point
 
