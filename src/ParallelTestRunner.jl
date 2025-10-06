@@ -8,6 +8,7 @@ import REPL
 using Printf: @sprintf
 using Base.Filesystem: path_separator
 import Test
+import Random
 
 include("setup.jl")
 

@@ -13,7 +13,8 @@ function __runtests(f, name)
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
         mod = @eval(Main, module $mod_name end)
-        @eval(mod, using Test, Random)
+        @eval(mod, import ParallelTestRunner: Test, Random)
+        @eval(mod, using .Test, .Random)
 
         let id = myid()
             wait(@spawnat 1 print_testworker_started(name, id))
@@ -24,7 +25,7 @@ function __runtests(f, name)
             Random.seed!(1)
 
             res = @timed @testset $name begin
-                include($f)
+                Main.include($f)
             end
             res..., 0, 0, 0
         end
