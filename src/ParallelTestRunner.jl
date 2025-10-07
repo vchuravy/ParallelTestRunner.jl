@@ -62,9 +62,79 @@ if VERSION >= v"1.13.0-DEV.1044"
     using Base.ScopedValues
 end
 
+abstract type AbstractTestRecord end
+
+struct TestRecord <: AbstractTestRecord
+    test::Any
+    time::Float64
+    bytes::Int
+    gctime::Float64
+    rss::UInt
+end
+
+function memory_usage(rec::TestRecord)
+    return rec.rss
+end
+
+struct TestIOContext
+    io::IO
+    lock::ReentrantLock
+    name_align::Int
+    elapsed_align::Int
+    gc_align::Int
+    percent_align::Int
+    alloc_align::Int
+    rss_align::Int
+end
+
+function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_align::Int)
+    elapsed_align = textwidth("Time (s)")
+    gc_align = textwidth("GC (s)")
+    percent_align = textwidth("GC %")
+    alloc_align = textwidth("Alloc (MB)")
+    rss_align = textwidth("RSS (MB)")
+
+    return TestIOContext(
+        io, lock, name_align, elapsed_align, gc_align, percent_align,
+        alloc_align, rss_align
+    )
+end
+
+function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
+    printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
+    printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
+    printstyled(ctx.io, testgroupheader, color = :white)
+    printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
+    printstyled(ctx.io, "Time (s) |  GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
+    return nothing
+end
+
+function print_testworker_stats(test, wrkr, record::TestRecord, ctx::TestIOContext)
+    lock(ctx.lock)
+    return try
+        printstyled(ctx.io, test, color = :white)
+        printstyled(ctx.io, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
+        time_str = @sprintf("%7.2f", record.time)
+        printstyled(ctx.io, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
+
+        gc_str = @sprintf("%5.2f", record.gctime)
+        printstyled(ctx.io, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
+        percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
+        printstyled(ctx.io, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
+        alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
+        printstyled(ctx.io, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
+
+        rss_str = @sprintf("%5.2f", record.rss / 2^20)
+        printstyled(ctx.io, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+
 ## entry point
 
-function runtest(f, name)
+function runtest(::Type{TestRecord}, f, name)
     function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
@@ -83,9 +153,10 @@ function runtest(f, name)
             res = @timed @testset $name begin
                 Main.include($f)
             end
-            res..., 0, 0, 0
+            (res...,)
         end
         data = Core.eval(mod, ex)
+
         #data[1] is the testset
 
         # process results
@@ -105,13 +176,9 @@ function runtest(f, name)
                 data[2],
                 data[3],
                 data[4],
-                data[5],
-                data[6],
-                data[7],
-                data[8],
             )
         end
-        res = vcat(collect(data), rss)
+        res = TestRecord(data..., rss)
 
         GC.gc(true)
         return res
@@ -133,7 +200,7 @@ function runtest(f, name)
     return res
 end
 
-function runtests(ARGS, testfilter = _ -> true)
+function runtests(ARGS, testfilter = _ -> true, RecordType = TestRecord)
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -270,42 +337,16 @@ function runtests(ARGS, testfilter = _ -> true)
             )
         ]
     )
+
     elapsed_align = textwidth("Time (s)")
-    gc_align = textwidth("GC (s)")
-    percent_align = textwidth("GC %")
-    alloc_align = textwidth("Alloc (MB)")
-    rss_align = textwidth("RSS (MB)")
-    printstyled(" "^(name_align + textwidth(testgroupheader) - 3), " | ")
-    printstyled("         | ---------------- CPU ---------------- |\n", color = :white)
-    printstyled(testgroupheader, color = :white)
-    printstyled(lpad(workerheader, name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-    printstyled("Time (s) |  GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
     print_lock = stdout isa Base.LibuvStream ? stdout.lock : ReentrantLock()
     if stderr isa Base.LibuvStream
         stderr.lock = print_lock
     end
-    function print_testworker_stats(test, wrkr, resp)
-        @nospecialize resp
-        lock(print_lock)
-        return try
-            printstyled(test, color = :white)
-            printstyled(lpad("($wrkr)", name_align - textwidth(test) + 1, " "), " | ", color = :white)
-            time_str = @sprintf("%7.2f", resp[2])
-            printstyled(lpad(time_str, elapsed_align, " "), " | ", color = :white)
 
-            gc_str = @sprintf("%5.2f", resp[4])
-            printstyled(lpad(gc_str, gc_align, " "), " | ", color = :white)
-            percent_str = @sprintf("%4.1f", 100 * resp[4] / resp[2])
-            printstyled(lpad(percent_str, percent_align, " "), " | ", color = :white)
-            alloc_str = @sprintf("%5.2f", resp[3] / 2^20)
-            printstyled(lpad(alloc_str, alloc_align, " "), " | ", color = :white)
+    io_ctx = test_IOContext(RecordType, stdout, print_lock, name_align)
+    print_header(RecordType, io_ctx, testgroupheader, workerheader)
 
-            rss_str = @sprintf("%5.2f", resp[9] / 2^20)
-            printstyled(lpad(rss_str, rss_align, " "), " |\n", color = :white)
-        finally
-            unlock(print_lock)
-        end
-    end
     global print_testworker_started = (name, wrkr) -> begin
         if do_verbose
             lock(print_lock)
@@ -391,7 +432,7 @@ function runtests(ARGS, testfilter = _ -> true)
                         # run the test
                         running_tests[test] = now()
                         try
-                            resp = remotecall_fetch(runtest, wrkr, test_runners[test], test)
+                            resp = remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test)
                         catch e
                             isa(e, InterruptException) && return
                             resp = Any[e]
@@ -400,20 +441,22 @@ function runtests(ARGS, testfilter = _ -> true)
                         push!(results, (test, resp))
 
                         # act on the results
-                        if resp[1] isa Exception
+                        if resp isa AbstractTestRecord
+                            print_testworker_stats(test, wrkr, resp::RecordType, io_ctx)
+
+                            if memory_usage(resp) > max_worker_rss
+                                # the worker has reached the max-rss limit, recycle it
+                                # so future tests start with a smaller working set
+                                p = recycle_worker(p)
+                            end
+                        else
+                            @assert resp[1] isa Exception
                             print_testworker_errored(test, wrkr)
                             do_quickfail && Base.throwto(t, InterruptException())
 
                             # the worker encountered some failure, recycle it
                             # so future tests get a fresh environment
                             p = recycle_worker(p)
-                        else
-                            print_testworker_stats(test, wrkr, resp)
-                            if resp[end] > max_worker_rss
-                                # the worker has reached the max-rss limit, recycle it
-                                # so future tests start with a smaller working set
-                                p = recycle_worker(p)
-                            end
                         end
                     end
 
@@ -460,7 +503,12 @@ function runtests(ARGS, testfilter = _ -> true)
     o_ts = Test.DefaultTestSet("Overall")
     with_testset(o_ts) do
         completed_tests = Set{String}()
-        for (testname, (resp,)) in results
+        for (testname, res) in results
+            if res isa AbstractTestRecord
+                resp = res.test
+            else
+                resp = res[1]
+            end
             push!(completed_tests, testname)
             if isa(resp, Test.DefaultTestSet)
                 with_testset(resp) do
