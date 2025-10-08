@@ -218,7 +218,7 @@ Run Julia tests in parallel across multiple worker processes.
 - `--verbose`: Print more detailed information during test execution
 - `--quickfail`: Stop the entire test run as soon as any test fails
 - `--jobs=N`: Use N worker processes (default: based on CPU threads and available memory)
-- `TESTS...`: Filter tests by name (partial matching supported)
+- `TESTS...`: Filter tests by name, matched using `startswith`
 
 ## Behavior
 
