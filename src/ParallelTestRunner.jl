@@ -200,7 +200,59 @@ function runtest(::Type{TestRecord}, f, name)
     return res
 end
 
-function runtests(ARGS, testfilter = _ -> true, RecordType = TestRecord)
+"""
+    runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
+
+Run Julia tests in parallel across multiple worker processes.
+
+## Arguments
+
+- `ARGS`: Command line arguments array, typically from `Base.ARGS`
+- `testfilter`: Optional function to filter which tests to run (default: run all tests)
+- `RecordType`: Type of test record to use for tracking test results (default: `TestRecord`)
+
+## Command Line Options
+
+- `--help`: Show usage information and exit
+- `--list`: List all available test files and exit
+- `--verbose`: Print more detailed information during test execution
+- `--quickfail`: Stop the entire test run as soon as any test fails
+- `--jobs=N`: Use N worker processes (default: based on CPU threads and available memory)
+- `TESTS...`: Filter tests by name (partial matching supported)
+
+## Behavior
+
+- Automatically discovers all `.jl` files in the test directory (excluding `setup.jl` and `runtests.jl`)
+- Sorts tests by file size (largest first) for optimal load balancing
+- Launches worker processes with appropriate Julia flags for testing
+- Monitors memory usage and recycles workers that exceed memory limits
+- Provides real-time progress output with timing and memory statistics
+- Handles interruptions gracefully (Ctrl+C)
+- Returns nothing, but throws `Test.FallbackTestSetException` if any tests fail
+
+## Examples
+
+```julia
+# Run all tests with default settings
+runtests(ARGS)
+
+# Run only tests matching "integration"
+runtests(["integration"])
+
+# Run with custom filter function
+runtests(ARGS, test -> occursin("unit", test))
+
+# Use custom test record type
+runtests(ARGS, Returns(true), MyCustomTestRecord)
+```
+
+## Memory Management
+
+Workers are automatically recycled when they exceed memory limits to prevent
+out-of-memory issues during long test runs. The memory limit is set based on
+system architecture.
+"""
+function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -260,10 +312,10 @@ function runtests(ARGS, testfilter = _ -> true, RecordType = TestRecord)
 
         append!(tests, files)
         for file in files
-            test_runners[file] = joinpath("$WORKDIR", "$file.jl")
+            test_runners[file] = joinpath(WORKDIR, "$file.jl")
         end
     end
-    sort!(tests; by = (file) -> stat(joinpath("$WORKDIR", "$file.jl")).size, rev = true)
+    sort!(tests; by = (file) -> stat(joinpath(WORKDIR, "$file.jl")).size, rev = true)
     ## finalize
     unique!(tests)
 
