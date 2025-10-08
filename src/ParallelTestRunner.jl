@@ -207,7 +207,7 @@ Run Julia tests in parallel across multiple worker processes.
 
 ## Arguments
 
-- `ARGS`: Command line arguments array, typically from `Base.ARGS`
+- `ARGS`: Command line arguments array, typically from `Base.ARGS`.  When you run the tests with `Pkg.test`, this can be changed with the `test_args` keyword argument
 - `testfilter`: Optional function to filter which tests to run (default: run all tests)
 - `RecordType`: Type of test record to use for tracking test results (default: `TestRecord`)
 
