@@ -344,7 +344,7 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
         memory_jobs = Int64(Sys.free_memory()) ÷ (2 * 2^30)
         jobs = max(1, min(jobs, memory_jobs))
     end
-    @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable."
+    @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable."
 
     # add workers
     test_exeflags = Base.julia_cmd()
