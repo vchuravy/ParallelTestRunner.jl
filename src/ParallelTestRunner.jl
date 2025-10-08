@@ -312,10 +312,10 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
 
         append!(tests, files)
         for file in files
-            test_runners[file] = joinpath(WORKDIR, "$file.jl")
+            test_runners[file] = joinpath(WORKDIR, file * ".jl")
         end
     end
-    sort!(tests; by = (file) -> stat(joinpath(WORKDIR, "$file.jl")).size, rev = true)
+    sort!(tests; by = (file) -> stat(joinpath(WORKDIR, file * ".jl")).size, rev = true)
     ## finalize
     unique!(tests)
 
