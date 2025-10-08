@@ -223,7 +223,7 @@ Run Julia tests in parallel across multiple worker processes.
 ## Behavior
 
 - Automatically discovers all `.jl` files in the test directory (excluding `setup.jl` and `runtests.jl`)
-- Sorts tests by file size (largest first) for optimal load balancing
+- Sorts tests by file size (largest first) for load balancing
 - Launches worker processes with appropriate Julia flags for testing
 - Monitors memory usage and recycles workers that exceed memory limits
 - Provides real-time progress output with timing and memory statistics
