@@ -200,6 +200,19 @@ function runtest(::Type{TestRecord}, f, name)
     return res
 end
 
+# This is an internal function, not to be used by end users.  The keyword
+# arguments are only for testing purposes.
+"""
+    default_njobs()
+
+Determine default number of parallel jobs.
+"""
+function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_memory())
+    jobs = cpu_threads
+    memory_jobs = Int64(free_memory) ÷ (2 * 2^30)
+    return max(1, min(jobs, memory_jobs))
+end
+
 """
     runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
 
@@ -263,7 +276,7 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
                --list             List all available tests.
                --verbose          Print more information during testing.
                --quickfail        Fail the entire run as soon as a single test errored.
-               --jobs=N           Launch `N` processes to perform tests (default: Sys.CPU_THREADS).
+               --jobs=N           Launch `N` processes to perform tests.
 
                Remaining arguments filter the tests that will be executed."""
         )
@@ -340,9 +353,7 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
 
     # determine parallelism
     if !set_jobs
-        jobs = Sys.CPU_THREADS
-        memory_jobs = Int64(Sys.free_memory()) ÷ (2 * 2^30)
-        jobs = max(1, min(jobs, memory_jobs))
+        jobs = default_njobs()
     end
     @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable."
 
