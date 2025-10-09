@@ -2,4 +2,8 @@ using ParallelTestRunner
 
 pushfirst!(ARGS, "--verbose")
 
-runtests(ARGS)
+custom_tests = Dict(
+    "whatever" => Returns(nothing)
+)
+
+runtests(ARGS; custom_tests)
