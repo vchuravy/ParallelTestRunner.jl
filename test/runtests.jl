@@ -2,8 +2,15 @@ using ParallelTestRunner
 
 pushfirst!(ARGS, "--verbose")
 
+init_code = quote
+    using Test
+    should_be_defined() = true
+end
+
 custom_tests = Dict(
-    "whatever" => Returns(nothing)
+    "custom" => quote
+        @test should_be_defined()
+    end
 )
 
-runtests(ARGS; custom_tests)
+runtests(ARGS; init_code, custom_tests)
