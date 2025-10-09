@@ -134,7 +134,7 @@ end
 
 ## entry point
 
-function runtest(::Type{TestRecord}, f, name)
+function runtest(::Type{TestRecord}, f, name, init_code)
     function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
@@ -146,16 +146,16 @@ function runtest(::Type{TestRecord}, f, name)
             wait(@spawnat 1 print_testworker_started(name, id))
         end
 
-        ex = quote
+        data = @eval mod begin
             GC.gc(true)
             Random.seed!(1)
+            $init_code
 
             res = @timed @testset $name begin
-                $f()
+                $f
             end
             (res...,)
         end
-        data = Core.eval(mod, ex)
 
         #data[1] is the testset
 
@@ -227,8 +227,9 @@ Several keyword arguments are also supported:
 
 - `testfilter`: Optional function to filter which tests to run (default: run all tests)
 - `RecordType`: Type of test record to use for tracking test results (default: `TestRecord`)
-- `custom_tests`: Optional dictionary of custom tests, mapping test names to a zero-argument
-  function
+- `custom_tests`: Optional dictionary of custom tests, mapping test names to expressions.
+- `init_code`: Code use to initialize each test's sandbox module (e.g., import auxiliary
+  packages, define constants, etc).
 
 ## Command Line Options
 
@@ -241,8 +242,7 @@ Several keyword arguments are also supported:
 
 ## Behavior
 
-- Automatically discovers all `.jl` files in the test directory (excluding `setup.jl` and
-  `runtests.jl`)
+- Automatically discovers all `.jl` files in the test directory (excluding `runtests.jl`)
 - Sorts tests by file size (largest first) for load balancing
 - Launches worker processes with appropriate Julia flags for testing
 - Monitors memory usage and recycles workers that exceed memory limits
@@ -272,7 +272,7 @@ Workers are automatically recycled when they exceed memory limits to prevent out
 issues during long test runs. The memory limit is set based on system architecture.
 """
 function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
-                  custom_tests::Dict{String}=Dict{String}())
+                  custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :())
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -313,7 +313,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     for (rootpath, dirs, files) in walkdir(WORKDIR)
         # find Julia files
         filter!(files) do file
-            endswith(file, ".jl") && file !== "setup.jl" && file !== "runtests.jl"
+            endswith(file, ".jl") && file !== "runtests.jl"
         end
         isempty(files) && continue
 
@@ -337,7 +337,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
         append!(tests, files)
         for file in files
-            test_runners[file] = ()->Main.include(joinpath(WORKDIR, file * ".jl"))
+            test_runners[file] = quote
+                include($(joinpath(WORKDIR, file * ".jl")))
+            end
         end
     end
     sort!(tests; by = (file) -> stat(joinpath(WORKDIR, file * ".jl")).size, rev = true)
@@ -387,14 +389,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             Distributed.remotecall_eval(
                 Main, procs, quote
                     import ParallelTestRunner
-                    # TODO: Should we import Test for the user here?
-                    import ParallelTestRunner: Test
-                    using .Test
                 end
             )
-            if ispath(joinpath(WORKDIR, "setup.jl"))
-                @everywhere procs include($(joinpath(WORKDIR, "setup.jl")))
-            end
             procs
         end
     end
@@ -507,7 +503,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                         # run the test
                         running_tests[test] = now()
                         try
-                            resp = remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test)
+                            resp = remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
                         catch e
                             isa(e, InterruptException) && return
                             resp = Any[e]
