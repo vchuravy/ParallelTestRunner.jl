@@ -151,7 +151,7 @@ function runtest(::Type{TestRecord}, f, name)
             Random.seed!(1)
 
             res = @timed @testset $name begin
-                Main.include($f)
+                $f()
             end
             (res...,)
         end
@@ -214,15 +214,21 @@ function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_m
 end
 
 """
-    runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
+    runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
 
 Run Julia tests in parallel across multiple worker processes.
 
 ## Arguments
 
-- `ARGS`: Command line arguments array, typically from `Base.ARGS`.  When you run the tests with `Pkg.test`, this can be changed with the `test_args` keyword argument
+The primary argument is a command line arguments array, typically from `Base.ARGS`. When you
+run the tests with `Pkg.test`, this can be changed with the `test_args` keyword argument.
+
+Several keyword arguments are also supported:
+
 - `testfilter`: Optional function to filter which tests to run (default: run all tests)
 - `RecordType`: Type of test record to use for tracking test results (default: `TestRecord`)
+- `custom_tests`: Optional dictionary of custom tests, mapping test names to a zero-argument
+  function
 
 ## Command Line Options
 
@@ -235,7 +241,8 @@ Run Julia tests in parallel across multiple worker processes.
 
 ## Behavior
 
-- Automatically discovers all `.jl` files in the test directory (excluding `setup.jl` and `runtests.jl`)
+- Automatically discovers all `.jl` files in the test directory (excluding `setup.jl` and
+  `runtests.jl`)
 - Sorts tests by file size (largest first) for load balancing
 - Launches worker processes with appropriate Julia flags for testing
 - Monitors memory usage and recycles workers that exceed memory limits
@@ -261,11 +268,11 @@ runtests(ARGS, Returns(true), MyCustomTestRecord)
 
 ## Memory Management
 
-Workers are automatically recycled when they exceed memory limits to prevent
-out-of-memory issues during long test runs. The memory limit is set based on
-system architecture.
+Workers are automatically recycled when they exceed memory limits to prevent out-of-memory
+issues during long test runs. The memory limit is set based on system architecture.
 """
-function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
+function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
+                  custom_tests::Dict{String}=Dict{String}())
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -297,6 +304,11 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
     # choose tests
     tests = []
     test_runners = Dict()
+    ## custom tests by the user
+    for (name, runner) in custom_tests
+        push!(tests, name)
+        test_runners[name] = runner
+    end
     ## files in the test folder
     for (rootpath, dirs, files) in walkdir(WORKDIR)
         # find Julia files
@@ -325,7 +337,7 @@ function runtests(ARGS, testfilter = Returns(true), RecordType = TestRecord)
 
         append!(tests, files)
         for file in files
-            test_runners[file] = joinpath(WORKDIR, file * ".jl")
+            test_runners[file] = ()->Main.include(joinpath(WORKDIR, file * ".jl"))
         end
     end
     sort!(tests; by = (file) -> stat(joinpath(WORKDIR, file * ".jl")).size, rev = true)
