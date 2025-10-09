@@ -7,10 +7,11 @@ init_code = quote
     should_be_defined() = true
 end
 
+runtests(ARGS; init_code)
+
 custom_tests = Dict(
     "custom" => quote
         @test should_be_defined()
     end
 )
-
 runtests(ARGS; init_code, custom_tests)

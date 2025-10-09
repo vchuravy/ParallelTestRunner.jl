@@ -272,7 +272,7 @@ Workers are automatically recycled when they exceed memory limits to prevent out
 issues during long test runs. The memory limit is set based on system architecture.
 """
 function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
-                  custom_tests::Dict{String}=Dict{String}(), init_code = :())
+                  custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :())
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
