@@ -146,10 +146,10 @@ function runtest(::Type{TestRecord}, f, name, init_code)
             wait(@spawnat 1 print_testworker_started(name, id))
         end
 
+        Core.eval(mod, init_code)
         data = @eval mod begin
             GC.gc(true)
             Random.seed!(1)
-            $init_code
 
             res = @timed @testset $name begin
                 $f
