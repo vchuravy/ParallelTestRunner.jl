@@ -213,11 +213,6 @@ function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_m
     return max(1, min(jobs, memory_jobs))
 end
 
-"""
-    addworkers(X; kwargs...)
-
-Add `X` worker processes, with additional keyword arguments passed to `addprocs`.
-"""
 test_exeflags = Base.julia_cmd()
 filter!(test_exeflags.exec) do c
     return !(startswith(c, "--depwarn") || startswith(c, "--check-bounds"))
@@ -227,6 +222,11 @@ push!(test_exeflags.exec, "--startup-file=no")
 push!(test_exeflags.exec, "--depwarn=yes")
 push!(test_exeflags.exec, "--project=$(Base.active_project())")
 test_exename = popfirst!(test_exeflags.exec)
+"""
+    addworkers(X; kwargs...)
+
+Add `X` worker processes, with additional keyword arguments passed to `Distributed.addprocs`.
+"""
 function addworkers(X; kwargs...)
     exename = test_exename
 
