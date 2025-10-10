@@ -100,35 +100,19 @@ function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_al
     )
 end
 
+# Message types for the printer channel
+# (:started, test_name, worker_id)
+# (:finished, test_name, worker_id, record)
+# (:errored, test_name, worker_id)
+const printer_channel = Channel{Tuple}(100)
+
 function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
     printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
     printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
     printstyled(ctx.io, testgroupheader, color = :white)
     printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-    printstyled(ctx.io, "Time (s) |  GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
+    printstyled(ctx.io, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
     return nothing
-end
-
-function print_testworker_stats(test, wrkr, record::TestRecord, ctx::TestIOContext)
-    lock(ctx.lock)
-    return try
-        printstyled(ctx.io, test, color = :white)
-        printstyled(ctx.io, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
-        time_str = @sprintf("%7.2f", record.time)
-        printstyled(ctx.io, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
-
-        gc_str = @sprintf("%5.2f", record.gctime)
-        printstyled(ctx.io, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
-        percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
-        printstyled(ctx.io, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
-        alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
-        printstyled(ctx.io, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
-
-        rss_str = @sprintf("%5.2f", record.rss / 2^20)
-        printstyled(ctx.io, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
-    finally
-        unlock(ctx.lock)
-    end
 end
 
 
@@ -142,8 +126,11 @@ function runtest(::Type{TestRecord}, f, name, init_code)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
 
+        # Signal that this test has started
         let id = myid()
-            wait(@spawnat 1 print_testworker_started(name, id))
+            @spawnat 1 begin
+                put!(printer_channel, (:started, name, id))
+            end
         end
 
         Core.eval(mod, init_code)
@@ -245,6 +232,12 @@ function addworkers(X; kwargs...)
 end
 addworker(; kwargs...) = addworkers(1; kwargs...)[1]
 
+function recycle_worker(p)
+    rmprocs(p, waitfor = 30)
+
+    return nothing
+end
+
 """
     runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
 
@@ -308,6 +301,10 @@ issues during long test runs. The memory limit is set based on system architectu
 function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                   custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
                   test_worker = Returns(nothing))
+    #
+    # set-up
+    #
+
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -409,6 +406,55 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     # add workers
     addworkers(min(jobs, length(tests)))
 
+    t0 = time()
+    results = []
+    tasks = Task[]
+    running_tests = Dict{String, Tuple{Int, Float64}}()  # test => (worker, start_time)
+
+    done = false
+    function stop_work()
+        if !done
+            done = true
+            for task in tasks
+                task == current_task() && continue
+                Base.istaskdone(task) && continue
+                try; schedule(task, InterruptException(); error=true); catch; end
+            end
+        end
+    end
+
+
+    #
+    # input
+    #
+
+    # Keyboard monitor (for more reliable CTRL-C handling)
+    if isa(stdin, Base.TTY)
+        # NOTE: this should be the first task; we really want it to complete
+        pushfirst!(tasks, @async begin
+            term = REPL.Terminals.TTYTerminal("xterm", stdin, stdout, stderr)
+            REPL.Terminals.raw!(term, true)
+            try
+                while !done
+                    c = read(term, Char)
+                    if c == '\x3'
+                        println("\nCaught interrupt, stopping...")
+                        stop_work()
+                        break
+                    end
+                end
+            finally
+                REPL.Terminals.raw!(term, false)
+            end
+        end)
+    end
+    # TODO: we have to be _fast_ here, as Pkg.jl only gives us 4 seconds to clean up
+
+
+    #
+    # output
+    #
+
     # pretty print information about gc and mem usage
     testgroupheader = "Test"
     workerheader = "(Worker)"
@@ -431,165 +477,246 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     io_ctx = test_IOContext(RecordType, stdout, print_lock, name_align)
     print_header(RecordType, io_ctx, testgroupheader, workerheader)
 
-    global print_testworker_started = (name, wrkr) -> begin
-        if do_verbose
-            lock(print_lock)
-            try
-                printstyled(name, color = :white)
-                printstyled(
-                    lpad("($wrkr)", name_align - textwidth(name) + 1, " "), " |",
-                    " "^elapsed_align, "started at $(now())\n", color = :white
-                )
-            finally
-                unlock(print_lock)
+    status_lines_visible = Ref(0)
+    function clear_status()
+        if status_lines_visible[] > 0
+            for i in 1:status_lines_visible[]
+                width = displaysize(stdout)[2]
+                print(stdout, "\r", " "^width, "\r")
+                if i < status_lines_visible[]
+                    print(stdout, "\033[1A")  # Move up
+                end
             end
+            print(stdout, "\r")
+            status_lines_visible[] = 0
         end
     end
-    function print_testworker_errored(name, wrkr)
-        lock(print_lock)
-        return try
-            printstyled(name, color = :red)
-            printstyled(
-                lpad("($wrkr)", name_align - textwidth(name) + 1, " "), " |",
-                " "^elapsed_align, " failed at $(now())\n", color = :red
-            )
+    function update_status()
+        isempty(running_tests) && return
+        completed = length(results)
+        total = completed + length(tests) + length(running_tests)
+
+        # line 1: empty line
+        line1 = ""
+
+        # line 2: running tests
+        test_list = sort(collect(running_tests), by = x -> x[2][2])
+        status_parts = map(test_list) do (test, (wrkr, _))
+            "$test ($wrkr)"
+        end
+        line2 = "Running:  " * join(status_parts, ", ")
+        ## truncate
+        max_width = displaysize(stdout)[2]
+        if length(line2) > max_width
+            line2 = line2[1:max_width-3] * "..."
+        end
+
+        # line 3: progress + ETA
+        line3 = "Progress: $completed/$total tests completed"
+        if completed > 0
+            elapsed_so_far = time() - t0
+            avg_time_per_test = elapsed_so_far / completed
+            remaining_tests = length(tests) + length(running_tests)
+            eta_seconds = avg_time_per_test * remaining_tests
+            eta_mins = round(Int, eta_seconds / 60)
+            line3 *= " | ETA: ~$eta_mins min"
+        end
+
+        # display
+        clear_status()
+        println(stdout, line1)
+        println(stdout, line2)
+        print(stdout, line3)
+        flush(stdout)
+        status_lines_visible[] = 3
+    end
+
+    push!(tasks, @async begin
+        last_status_update = Ref(time())
+        try
+            # XXX: it's possible this task doesn't run, not processing results,
+            #      while the execution runners have exited...
+            while !done
+                got_message = false
+                while isready(printer_channel)
+                    # Try to get a message from the channel (with timeout)
+                    msg = take!(printer_channel)
+                    got_message = true
+                    msg_type = msg[1]
+
+                    if msg_type == :started
+                        test_name, wrkr = msg[2], msg[3]
+
+                        # Optionally print verbose started message
+                        if do_verbose
+                            printstyled(test_name, color = :white)
+                            printstyled(
+                                lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " |",
+                                " "^elapsed_align, "started at $(now())\n", color = :white
+                            )
+                            flush(stdout)
+                        end
+
+                    elseif msg_type == :finished
+                        test_name, wrkr, record = msg[2], msg[3], msg[4]
+
+                        # Clear status lines before printing result
+                        clear_status()
+
+                        # Print test result
+                        printstyled(test_name, color = :white)
+                        printstyled(stdout, lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " | ", color = :white)
+                        time_str = @sprintf("%7.2f", record.time)
+                        printstyled(stdout, lpad(time_str, elapsed_align, " "), " | ", color = :white)
+                        gc_str = @sprintf("%5.2f", record.gctime)
+                        printstyled(stdout, lpad(gc_str, io_ctx.gc_align, " "), " | ", color = :white)
+                        percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
+                        printstyled(stdout, lpad(percent_str, io_ctx.percent_align, " "), " | ", color = :white)
+                        alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
+                        printstyled(stdout, lpad(alloc_str, io_ctx.alloc_align, " "), " | ", color = :white)
+                        rss_str = @sprintf("%5.2f", record.rss / 2^20)
+                        printstyled(stdout, lpad(rss_str, io_ctx.rss_align, " "), " |\n", color = :white)
+                        flush(stdout)
+
+                    elseif msg_type == :errored
+                        test_name, wrkr = msg[2], msg[3]
+
+                        # Clear status lines before printing error
+                        clear_status()
+
+                        printstyled(test_name, color = :red)
+                        printstyled(
+                            lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " |",
+                            " "^elapsed_align, " failed at $(now())\n", color = :red
+                        )
+                        flush(stdout)
+                    end
+                end
+
+                # After a while, display a status line
+                if time() - t0 >= 5 && (got_message || (time() - last_status_update[] >= 1))
+                    update_status()
+                    last_status_update[] = time()
+                end
+                sleep(0.1)
+            end
+        catch ex
+            isa(ex, InterruptException) || rethrow()
         finally
-            unlock(print_lock)
+            if isempty(tests) && isempty(running_tests)
+                # XXX: only erase the status if we completed successfully.
+                #      in other cases we'll have printed "caught interrupt"
+                clear_status()
+            end
+        end
+    end)
+
+
+    #
+    # execution
+    #
+
+    for p in workers()
+        push!(tasks, @async begin
+            while length(tests) > 0 && !done
+                # if a worker failed, spawn a new one
+                if p === nothing
+                    p = addworkers(1)[1]
+                end
+
+                # get a test to run
+                test = popfirst!(tests)
+                wrkr = something(test_worker(test), p)
+                running_tests[test] = (wrkr, time())
+
+                # run the test
+                resp = try
+                    remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
+                catch e
+                    isa(e, InterruptException) && return
+                    Any[e]
+                end
+                push!(results, (test, resp))
+
+                # act on the results
+                if resp isa AbstractTestRecord
+                    put!(printer_channel, (:finished, test, wrkr, resp::RecordType))
+
+                    if memory_usage(resp) > max_worker_rss
+                        # the worker has reached the max-rss limit, recycle it
+                        # so future tests start with a smaller working set
+                        p = recycle_worker(p)
+                    end
+                else
+                    @assert resp[1] isa Exception
+                    put!(printer_channel, (:errored, test, wrkr))
+                    if do_quickfail
+                        stop_work()
+                    end
+
+                    # the worker encountered some failure, recycle it
+                    # so future tests get a fresh environment
+                    p = recycle_worker(p)
+                end
+
+                # get rid of the custom worker
+                if wrkr != p
+                    recycle_worker(wrkr)
+                end
+
+                delete!(running_tests, test)
+            end
+
+            if p !== nothing
+                recycle_worker(p)
+            end
+        end)
+    end
+
+
+    #
+    # finalization
+    #
+
+    # monitor tasks for failure so that each one doesn't need a try/catch + stop_work()
+    try
+        while true
+            if any(istaskfailed, tasks)
+                println("\nCaught an error, stopping...")
+                break
+            elseif done || (isempty(tests) && isempty(running_tests))
+                break
+            end
+            sleep(1)
+        end
+    catch err
+        # in case the sleep got interrupted
+        isa(err, InterruptException) || rethrow()
+    finally
+        stop_work()
+    end
+    ## `wait()` to actually catch any exceptions
+    for task in tasks
+        try
+            wait(task)
+        catch err
+            # unwrap TaskFailedException
+            while isa(err, TaskFailedException)
+                err = current_exceptions(err.task)[1].exception
+            end
+
+            isa(err, InterruptException) || rethrow()
         end
     end
 
     # construct a testset to render the test results
-    o_ts = Test.DefaultTestSet("Overall")
-    # run tasks
-    results = []
-    all_tasks = Task[]
-    try
-        # Monitor stdin and kill this task on ^C
-        # but don't do this on Windows, because it may deadlock in the kernel
-        t = current_task()
-        running_tests = Dict{String, DateTime}()
-        if !Sys.iswindows() && isa(stdin, Base.TTY)
-            stdin_monitor = @async begin
-                term = REPL.Terminals.TTYTerminal("xterm", stdin, stdout, stderr)
-                try
-                    REPL.Terminals.raw!(term, true)
-                    while true
-                        c = read(term, Char)
-                        if c == '\x3'
-                            Base.throwto(t, InterruptException())
-                            break
-                        elseif c == '?'
-                            println("Currently running: ")
-                            tests = sort(collect(running_tests), by = x -> x[2])
-                            foreach(tests) do (test, date)
-                                println(test, " (running for ", round(now() - date, Minute), ")")
-                            end
-                        end
-                    end
-                catch e
-                    isa(e, InterruptException) || rethrow()
-                finally
-                    REPL.Terminals.raw!(term, false)
-                end
-            end
-        end
-        @sync begin
-            function recycle_worker(p)
-                rmprocs(p, waitfor = 30)
-
-                return nothing
-            end
-
-            for p in workers()
-                @async begin
-                    push!(all_tasks, current_task())
-                    while length(tests) > 0
-                        test = popfirst!(tests)
-
-                        # if a worker failed, spawn a new one
-                        if p === nothing
-                            p = addworkers(1)[1]
-                        end
-
-                        # some tests may need a special worker
-                        wrkr = something(test_worker(test), p)
-
-                        # run the test
-                        running_tests[test] = now()
-                        resp = try
-                            remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
-                        catch e
-                            isa(e, InterruptException) && return
-                            Any[e]
-                        end
-                        delete!(running_tests, test)
-                        push!(results, (test, resp))
-
-                        # act on the results
-                        if resp isa AbstractTestRecord
-                            print_testworker_stats(test, wrkr, resp::RecordType, io_ctx)
-
-                            if memory_usage(resp) > max_worker_rss
-                                # the worker has reached the max-rss limit, recycle it
-                                # so future tests start with a smaller working set
-                                p = recycle_worker(p)
-                            end
-                        else
-                            @assert resp[1] isa Exception
-                            print_testworker_errored(test, wrkr)
-                            do_quickfail && Base.throwto(t, InterruptException())
-
-                            # the worker encountered some failure, recycle it
-                            # so future tests get a fresh environment
-                            p = recycle_worker(p)
-                        end
-
-                        # get rid of the custom worker
-                        if wrkr != p
-                            recycle_worker(wrkr)
-                        end
-                    end
-
-                    if p !== nothing
-                        recycle_worker(p)
-                    end
-                end
-            end
-        end
-    catch e
-        isa(e, InterruptException) || rethrow()
-        # If the test suite was merely interrupted, still print the
-        # summary, which can be useful to diagnose what's going on
-        foreach(
-            task -> begin
-                istaskstarted(task) || return
-                istaskdone(task) && return
-                try
-                    schedule(task, InterruptException(); error = true)
-                catch ex
-                    @error "InterruptException" exception = ex, catch_backtrace()
-                end
-            end, all_tasks
-        )
-        for t in all_tasks
-            # NOTE: we can't just wait, but need to discard the exception,
-            #       because the throwto for --quickfail also kills the worker.
-            try
-                wait(t)
-            catch e
-                showerror(stderr, e)
-            end
-        end
-    finally
-        if @isdefined stdin_monitor
-            schedule(stdin_monitor, InterruptException(); error = true)
-        end
-    end
     t1 = time()
-
+    o_ts = Test.DefaultTestSet("Overall")
     if VERSION < v"1.13.0-DEV.1037"
+        o_ts.time_start = t0
         o_ts.time_end = t1
     else
+        @atomic o_ts.time_start = t0
         @atomic o_ts.time_end = t1
     end
     with_testset(o_ts) do
@@ -648,7 +775,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 end
             end
         end
-        for test in tests
+
+        # mark remaining or running tests as interrupted
+        for test in [tests; collect(keys(running_tests))]
             (test in completed_tests) && continue
             fake = Test.DefaultTestSet(test)
             Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))

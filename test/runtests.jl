@@ -1,6 +1,8 @@
 using ParallelTestRunner
 using Test, IOCapture
 
+cd(@__DIR__)
+
 @testset "ParallelTestRunner" verbose=true begin
 
 @testset "basic test" begin
