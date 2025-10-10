@@ -67,9 +67,9 @@ abstract type AbstractTestRecord end
 struct TestRecord <: AbstractTestRecord
     test::Any
     time::Float64
-    bytes::Int
+    bytes::UInt64
     gctime::Float64
-    rss::UInt
+    rss::UInt64
 end
 
 function memory_usage(rec::TestRecord)
