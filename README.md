@@ -35,7 +35,7 @@ runtests(ARGS)
 
 ### Filtering
 
-`runtests` takes a second argument that acts as a filter function
+`runtests` takes a keyword argument that acts as a filter function
 
 ```julia
 function testfilter(test)
@@ -45,9 +45,22 @@ function testfilter(test)
     return true
 end
 
-runtests(ARGS, testfilter)
+runtests(ARGS; testfilter)
 ```
 
+### Provide defaults
+
+`runtests` takes a keyword argument that one can use to provide default definitions to be loaded before each testfile.
+As an example one could always load `Test` and the package under test.
+
+```julia
+const init_code = quote
+   using Test
+   using MyPackage
+end
+
+runtests(ARGS; init_code)
+```
 
 ## Inspiration
 Based on [@maleadt](https://github.com/maleadt) test infrastructure for [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl).
