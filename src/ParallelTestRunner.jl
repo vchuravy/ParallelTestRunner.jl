@@ -213,25 +213,30 @@ function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_m
     return max(1, min(jobs, memory_jobs))
 end
 
-test_exeflags = Base.julia_cmd()
-filter!(test_exeflags.exec) do c
-    return !(startswith(c, "--depwarn") || startswith(c, "--check-bounds"))
+function test_exe()
+    test_exeflags = Base.julia_cmd()
+    filter!(test_exeflags.exec) do c
+        !(startswith(c, "--depwarn") || startswith(c, "--check-bounds"))
+    end
+    push!(test_exeflags.exec, "--check-bounds=yes")
+    push!(test_exeflags.exec, "--startup-file=no")
+    push!(test_exeflags.exec, "--depwarn=yes")
+    push!(test_exeflags.exec, "--project=$(Base.active_project())")
+    return test_exeflags
 end
-push!(test_exeflags.exec, "--check-bounds=yes")
-push!(test_exeflags.exec, "--startup-file=no")
-push!(test_exeflags.exec, "--depwarn=yes")
-push!(test_exeflags.exec, "--project=$(Base.active_project())")
-test_exename = popfirst!(test_exeflags.exec)
+
 """
     addworkers(X; kwargs...)
 
 Add `X` worker processes, with additional keyword arguments passed to `Distributed.addprocs`.
 """
 function addworkers(X; kwargs...)
-    exename = test_exename
+    exe = test_exe()
+    exename = exe[1]
+    exeflags = exe[2:end]
 
     return withenv("JULIA_NUM_THREADS" => 1, "OPENBLAS_NUM_THREADS" => 1) do
-        procs = addprocs(X; exename = exename, exeflags = test_exeflags, kwargs...)
+        procs = addprocs(X; exename, exeflags, kwargs...)
         Distributed.remotecall_eval(
             Main, procs, quote
                 import ParallelTestRunner
