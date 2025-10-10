@@ -587,11 +587,11 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
     t1 = now()
-    elapsed = canonicalize(Dates.CompoundPeriod(t1 - t0))
-    println("Testing finished in $elapsed")
 
     # construct a testset to render the test results
     o_ts = Test.DefaultTestSet("Overall")
+    o_ts.time_start = Dates.datetime2unix(t0)
+    o_ts.time_end = Dates.datetime2unix(t1)
     with_testset(o_ts) do
         completed_tests = Set{String}()
         for (testname, res) in results
