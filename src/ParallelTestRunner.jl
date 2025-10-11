@@ -76,6 +76,11 @@ function memory_usage(rec::TestRecord)
     return rec.rss
 end
 
+
+#
+# overridable I/O context for pretty-printing
+#
+
 struct TestIOContext
     io::IO
     lock::ReentrantLock
@@ -100,23 +105,77 @@ function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_al
     )
 end
 
-# Message types for the printer channel
-# (:started, test_name, worker_id)
-# (:finished, test_name, worker_id, record)
-# (:errored, test_name, worker_id)
-const printer_channel = Channel{Tuple}(100)
-
 function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
-    printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
-    printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
-    printstyled(ctx.io, testgroupheader, color = :white)
-    printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-    printstyled(ctx.io, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
-    return nothing
+    lock(ctx.lock)
+    try
+        printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
+        printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
+        printstyled(ctx.io, testgroupheader, color = :white)
+        printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
+        printstyled(ctx.io, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
+        flush(ctx.io)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(test, color = :white)
+        printstyled(
+            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
+            " "^ctx.elapsed_align, "started at $(now())\n", color = :white
+        )
+        flush(ctx.io)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(ctx.io, test, color = :white)
+        printstyled(ctx.io, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
+        time_str = @sprintf("%7.2f", record.time)
+        printstyled(ctx.io, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
+
+        gc_str = @sprintf("%5.2f", record.gctime)
+        printstyled(ctx.io, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
+        percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
+        printstyled(ctx.io, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
+        alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
+        printstyled(ctx.io, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
+
+        rss_str = @sprintf("%5.2f", record.rss / 2^20)
+        printstyled(ctx.io, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
+
+        flush(ctx.io)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(test, color = :red)
+        printstyled(
+            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
+            " "^ctx.elapsed_align, " failed at $(now())\n", color = :red
+        )
+
+        flush(ctx.io)
+    finally
+        unlock(ctx.lock)
+    end
 end
 
 
-## entry point
+#
+# entry point
+#
 
 function runtest(::Type{TestRecord}, f, name, init_code)
     function inner()
@@ -524,6 +583,12 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         status_lines_visible[] = 3
     end
 
+    # Message types for the printer channel
+    # (:started, test_name, worker_id)
+    # (:finished, test_name, worker_id, record)
+    # (:errored, test_name, worker_id)
+    printer_channel = Channel{Tuple}(100)
+
     push!(tasks, @async begin
         last_status_update = Ref(time())
         try
@@ -542,47 +607,21 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
                         # Optionally print verbose started message
                         if do_verbose
-                            printstyled(test_name, color = :white)
-                            printstyled(
-                                lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " |",
-                                " "^elapsed_align, "started at $(now())\n", color = :white
-                            )
-                            flush(stdout)
+                            clear_status()
+                            print_test_started(RecordType, wrkr, test_name, io_ctx)
                         end
 
                     elseif msg_type == :finished
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
-                        # Clear status lines before printing result
                         clear_status()
-
-                        # Print test result
-                        printstyled(test_name, color = :white)
-                        printstyled(stdout, lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " | ", color = :white)
-                        time_str = @sprintf("%7.2f", record.time)
-                        printstyled(stdout, lpad(time_str, elapsed_align, " "), " | ", color = :white)
-                        gc_str = @sprintf("%5.2f", record.gctime)
-                        printstyled(stdout, lpad(gc_str, io_ctx.gc_align, " "), " | ", color = :white)
-                        percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
-                        printstyled(stdout, lpad(percent_str, io_ctx.percent_align, " "), " | ", color = :white)
-                        alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
-                        printstyled(stdout, lpad(alloc_str, io_ctx.alloc_align, " "), " | ", color = :white)
-                        rss_str = @sprintf("%5.2f", record.rss / 2^20)
-                        printstyled(stdout, lpad(rss_str, io_ctx.rss_align, " "), " |\n", color = :white)
-                        flush(stdout)
+                        print_test_finished(test_name, wrkr, record, io_ctx)
 
                     elseif msg_type == :errored
                         test_name, wrkr = msg[2], msg[3]
 
-                        # Clear status lines before printing error
                         clear_status()
-
-                        printstyled(test_name, color = :red)
-                        printstyled(
-                            lpad("($wrkr)", name_align - textwidth(test_name) + 1, " "), " |",
-                            " "^elapsed_align, " failed at $(now())\n", color = :red
-                        )
-                        flush(stdout)
+                        print_test_errorred(RecordType, wrkr, test_name, io_ctx)
                     end
                 end
 
