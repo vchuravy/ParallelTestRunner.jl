@@ -38,8 +38,9 @@ jobs:
           - 'min'
           - '1'
           - 'pre'
+          - 'nightly'
         julia-arch:
-          - x64
+          - default
           - x86
         os:
           - ubuntu-latest
