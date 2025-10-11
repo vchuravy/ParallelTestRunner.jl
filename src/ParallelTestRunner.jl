@@ -460,8 +460,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
 
+    # construct a testset to render the test results
+    o_ts = Test.DefaultTestSet("Overall")
     # run tasks
-    t0 = now()
     results = []
     all_tasks = Task[]
     try
@@ -586,12 +587,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             schedule(stdin_monitor, InterruptException(); error = true)
         end
     end
-    t1 = now()
+    t1 = time()
 
-    # construct a testset to render the test results
-    o_ts = Test.DefaultTestSet("Overall")
-    o_ts.time_start = Dates.datetime2unix(t0)
-    o_ts.time_end = Dates.datetime2unix(t1)
+    if VERSION < v"1.13.0-DEV.1037"
+        o_ts.time_end = t1
+    else
+        @atomic o_ts.time_end = t1
+    end
     with_testset(o_ts) do
         completed_tests = Set{String}()
         for (testname, res) in results
