@@ -126,13 +126,6 @@ function runtest(::Type{TestRecord}, f, name, init_code)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
 
-        # Signal that this test has started
-        let id = myid()
-            @spawnat 1 begin
-                put!(printer_channel, (:started, name, id))
-            end
-        end
-
         Core.eval(mod, init_code)
         data = @eval mod begin
             GC.gc(true)
@@ -627,16 +620,19 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # get a test to run
                 test = popfirst!(tests)
                 wrkr = something(test_worker(test), p)
-                running_tests[test] = (wrkr, time())
 
                 # run the test
+                test_t0 = time()
+                running_tests[test] = (wrkr, test_t0)
+                put!(printer_channel, (:started, test, wrkr))
                 resp = try
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
                 catch e
                     isa(e, InterruptException) && return
                     Any[e]
                 end
-                push!(results, (test, resp))
+                test_t1 = time()
+                push!(results, (test, resp, test_t0, test_t1))
 
                 # act on the results
                 if resp isa AbstractTestRecord
@@ -711,27 +707,27 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
     # construct a testset to render the test results
     t1 = time()
-    o_ts = Test.DefaultTestSet("Overall")
+    o_ts = Test.DefaultTestSet("Overall"; verbose=do_verbose)
     if VERSION < v"1.13.0-DEV.1037"
         o_ts.time_start = t0
         o_ts.time_end = t1
     else
-        @atomic o_ts.time_start = t0
+        #@atomic o_ts.time_start = t0
         @atomic o_ts.time_end = t1
     end
     with_testset(o_ts) do
         completed_tests = Set{String}()
-        for (testname, res) in results
+        for (testname, res, start, stop) in results
             if res isa AbstractTestRecord
                 resp = res.test
             else
                 resp = res[1]
             end
             push!(completed_tests, testname)
-            if isa(resp, Test.DefaultTestSet)
-                with_testset(resp) do
-                    Test.record(o_ts, resp)
-                end
+
+            # decode or fake a testset
+            testset = if isa(resp, Test.DefaultTestSet)
+                resp
             elseif isa(resp, Tuple{Int, Int})
                 fake = Test.DefaultTestSet(testname)
                 for i in 1:resp[1]
@@ -740,10 +736,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 for i in 1:resp[2]
                     Test.record(fake, Test.Broken(:test, nothing))
                 end
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
-            elseif isa(resp, RemoteException) && isa(resp.captured.ex, Test.TestSetException)
+                fake
+            elseif isa(resp, RemoteException) &&
+                   isa(resp.captured.ex, Test.TestSetException)
                 println("Worker $(resp.pid) failed running test $(testname):")
                 Base.showerror(stdout, resp.captured)
                 println()
@@ -757,9 +752,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 for t in resp.captured.ex.errors_and_fails
                     Test.record(fake, t)
                 end
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
+                fake
             else
                 if !isa(resp, Exception)
                     resp = ErrorException(string("Unknown result type : ", typeof(resp)))
@@ -770,9 +763,19 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # deserialization errors or something similar.  Record this testset as Errored.
                 fake = Test.DefaultTestSet(testname)
                 Test.record(fake, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
+                fake
+            end
+
+            # record the testset
+            if VERSION < v"1.13.0-DEV.1037"
+                testset.time_start = start
+                testset.time_end = stop
+            else
+                #@atomic testset.time_start = start
+                @atomic testset.time_end = stop
+            end
+            with_testset(testset) do
+                Test.record(o_ts, testset)
             end
         end
 
