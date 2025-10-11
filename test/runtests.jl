@@ -2,6 +2,7 @@ using ParallelTestRunner
 using Test
 
 pushfirst!(ARGS, "--verbose")
+cd(@__DIR__)
 
 runtests(ARGS)
 
