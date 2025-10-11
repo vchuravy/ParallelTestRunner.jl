@@ -62,5 +62,12 @@ end
 runtests(ARGS; init_code)
 ```
 
+## Packages using ParallelTestRunner.jl
+
+There are a few packages already using `ParallelTestRunner.jl` to parallelize their tests, you can look at their setups if you need inspiration to move your packages as well:
+
+* [`Enzyme.jl`](https://github.com/EnzymeAD/Enzyme.jl/blob/main/test/runtests.jl)
+* [`GPUCompiler.jl`](https://github.com/JuliaGPU/GPUCompiler.jl/blob/master/test/runtests.jl)
+
 ## Inspiration
 Based on [@maleadt](https://github.com/maleadt) test infrastructure for [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl).
