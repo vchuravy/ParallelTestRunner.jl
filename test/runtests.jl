@@ -88,6 +88,7 @@ end
     @test contains(str, r"basic .+ started at")
     @test contains(str, r"failing test .+ failed at")
     @test contains(str, "FAILURE")
+    @test contains(str, "Test Failed")
     @test contains(str, "1 == 2")
 end
 
@@ -107,7 +108,7 @@ end
     @test contains(str, r"basic .+ started at")
     @test contains(str, r"throwing test .+ failed at")
     @test contains(str, "FAILURE")
-    @test contains(str, "Got exception outside of a @test")
+    @test contains(str, "Error During Test")
     @test contains(str, "This test throws an error")
 end
 
