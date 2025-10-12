@@ -9,6 +9,7 @@ using Printf: @sprintf
 using Base.Filesystem: path_separator
 import Test
 import Random
+import IOCapture
 
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
@@ -82,7 +83,8 @@ end
 #
 
 struct TestIOContext
-    io::IO
+    stdout::IO
+    stderr::IO
     lock::ReentrantLock
     name_align::Int
     elapsed_align::Int
@@ -92,7 +94,7 @@ struct TestIOContext
     rss_align::Int
 end
 
-function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_align::Int)
+function test_IOContext(::Type{TestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int)
     elapsed_align = textwidth("Time (s)")
     gc_align = textwidth("GC (s)")
     percent_align = textwidth("GC %")
@@ -100,7 +102,7 @@ function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_al
     rss_align = textwidth("RSS (MB)")
 
     return TestIOContext(
-        io, lock, name_align, elapsed_align, gc_align, percent_align,
+        stdout, stderr, lock, name_align, elapsed_align, gc_align, percent_align,
         alloc_align, rss_align
     )
 end
@@ -108,12 +110,12 @@ end
 function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
     lock(ctx.lock)
     try
-        printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
-        printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
-        printstyled(ctx.io, testgroupheader, color = :white)
-        printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-        printstyled(ctx.io, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
-        flush(ctx.io)
+        printstyled(ctx.stdout, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
+        printstyled(ctx.stdout, "         | ---------------- CPU ---------------- |\n", color = :white)
+        printstyled(ctx.stdout, testgroupheader, color = :white)
+        printstyled(ctx.stdout, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
+        printstyled(ctx.stdout, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
+        flush(ctx.stdout)
     finally
         unlock(ctx.lock)
     end
@@ -122,12 +124,13 @@ end
 function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
-        printstyled(test, color = :white)
+        printstyled(ctx.stdout, test, color = :white)
         printstyled(
+            ctx.stdout,
             lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
             " "^ctx.elapsed_align, "started at $(now())\n", color = :white
         )
-        flush(ctx.io)
+        flush(ctx.stdout)
     finally
         unlock(ctx.lock)
     end
@@ -136,22 +139,22 @@ end
 function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
     lock(ctx.lock)
     try
-        printstyled(ctx.io, test, color = :white)
-        printstyled(ctx.io, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
+        printstyled(ctx.stdout, test, color = :white)
+        printstyled(ctx.stdout, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
         time_str = @sprintf("%7.2f", record.time)
-        printstyled(ctx.io, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
 
         gc_str = @sprintf("%5.2f", record.gctime)
-        printstyled(ctx.io, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
         percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
-        printstyled(ctx.io, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
         alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
-        printstyled(ctx.io, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
 
         rss_str = @sprintf("%5.2f", record.rss / 2^20)
-        printstyled(ctx.io, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
+        printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
 
-        flush(ctx.io)
+        flush(ctx.stdout)
     finally
         unlock(ctx.lock)
     end
@@ -160,13 +163,14 @@ end
 function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
-        printstyled(test, color = :red)
+        printstyled(ctx.stderr, test, color = :red)
         printstyled(
+            ctx.stderr,
             lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
             " "^ctx.elapsed_align, " failed at $(now())\n", color = :red
         )
 
-        flush(ctx.io)
+        flush(ctx.stderr)
     finally
         unlock(ctx.lock)
     end
@@ -318,6 +322,7 @@ Several keyword arguments are also supported:
 - `--quickfail`: Stop the entire test run as soon as any test fails
 - `--jobs=N`: Use N worker processes (default: based on CPU threads and available memory)
 - `TESTS...`: Filter tests by name, matched using `startswith`
+- `stdout` and `stderr`: I/O streams to write to (default: `Base.stdout` and `Base.stderr`)
 
 ## Behavior
 
@@ -352,7 +357,7 @@ issues during long test runs. The memory limit is set based on system architectu
 """
 function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                   custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
-                  test_worker = Returns(nothing))
+                  test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
     #
     # set-up
     #
@@ -453,7 +458,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     if !set_jobs
         jobs = default_njobs()
     end
-    @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable."
+    println(stdout, "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable.")
 
     # add workers
     addworkers(min(jobs, length(tests)))
@@ -490,7 +495,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 while !done
                     c = read(term, Char)
                     if c == '\x3'
-                        println("\nCaught interrupt, stopping...")
+                        println(stderr, "\nCaught interrupt, stopping...")
                         stop_work()
                         break
                     end
@@ -526,26 +531,26 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         stderr.lock = print_lock
     end
 
-    io_ctx = test_IOContext(RecordType, stdout, print_lock, name_align)
+    io_ctx = test_IOContext(RecordType, stdout, stderr, print_lock, name_align)
     print_header(RecordType, io_ctx, testgroupheader, workerheader)
 
     status_lines_visible = Ref(0)
     function clear_status()
         if status_lines_visible[] > 0
             for i in 1:status_lines_visible[]
-                width = displaysize(stdout)[2]
-                print(stdout, "\r", " "^width, "\r")
+                width = displaysize(io_ctx.stdout)[2]
+                print(io_ctx.stdout, "\r", " "^width, "\r")
                 if i < status_lines_visible[]
-                    print(stdout, "\033[1A")  # Move up
+                    print(io_ctx.stdout, "\033[1A")  # Move up
                 end
             end
-            print(stdout, "\r")
+            print(io_ctx.stdout, "\r")
             status_lines_visible[] = 0
         end
     end
     function update_status()
         # only draw the status bar on actual terminals
-        stdout isa Base.TTY || return
+        io_ctx.stdout isa Base.TTY || return
 
         # only draw if we have something to show
         isempty(running_tests) && return
@@ -562,7 +567,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
         line2 = "Running:  " * join(status_parts, ", ")
         ## truncate
-        max_width = displaysize(stdout)[2]
+        max_width = displaysize(io_ctx.stdout)[2]
         if length(line2) > max_width
             line2 = line2[1:max_width-3] * "..."
         end
@@ -580,10 +585,10 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
         # display
         clear_status()
-        println(stdout, line1)
-        println(stdout, line2)
-        print(stdout, line3)
-        flush(stdout)
+        println(io_ctx.stdout, line1)
+        println(io_ctx.stdout, line2)
+        print(io_ctx.stdout, line3)
+        flush(io_ctx.stdout)
         status_lines_visible[] = 3
     end
 
@@ -721,7 +726,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     try
         while true
             if any(istaskfailed, tasks)
-                println("\nCaught an error, stopping...")
+                println(io_ctx.stderr, "\nCaught an error, stopping...")
                 break
             elseif done || (isempty(tests) && isempty(running_tests))
                 break
@@ -782,19 +787,23 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 fake
             elseif isa(resp, RemoteException) &&
                    isa(resp.captured.ex, Test.TestSetException)
-                println("Worker $(resp.pid) failed running test $(testname):")
-                Base.showerror(stdout, resp.captured)
-                println()
+                println(io_ctx.stderr, "Worker $(resp.pid) failed running test $(testname):")
+                Base.showerror(io_ctx.stderr, resp.captured)
+                println(io_ctx.stderr)
+
                 fake = Test.DefaultTestSet(testname)
-                for i in 1:resp.captured.ex.pass
-                    Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
+                c = IOCapture.capture() do
+                    for i in 1:resp.captured.ex.pass
+                        Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
+                    end
+                    for i in 1:resp.captured.ex.broken
+                        Test.record(fake, Test.Broken(:test, nothing))
+                    end
+                    for t in resp.captured.ex.errors_and_fails
+                        Test.record(fake, t)
+                    end
                 end
-                for i in 1:resp.captured.ex.broken
-                    Test.record(fake, Test.Broken(:test, nothing))
-                end
-                for t in resp.captured.ex.errors_and_fails
-                    Test.record(fake, t)
-                end
+                print(io_ctx.stdout, c.output)
                 fake
             else
                 if !isa(resp, Exception)
@@ -805,7 +814,10 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # the test runner itself had some problem, so we may have hit a segfault,
                 # deserialization errors or something similar.  Record this testset as Errored.
                 fake = Test.DefaultTestSet(testname)
-                Test.record(fake, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
+                c = IOCapture.capture() do
+                    Test.record(fake, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
+                end
+                print(io_ctx.stdout, c.output)
                 fake
             end
 
@@ -826,20 +838,37 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         for test in [tests; collect(keys(running_tests))]
             (test in completed_tests) && continue
             fake = Test.DefaultTestSet(test)
-            Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
+            c = IOCapture.capture() do
+                Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
+            end
+            print(io_ctx.stdout, c.output)
             with_testset(fake) do
                 Test.record(o_ts, fake)
             end
         end
     end
-    println()
-    Test.print_test_results(o_ts, 1)
+    println(io_ctx.stdout)
+    if VERSION >= v"1.13.0-DEV.1033"
+        Test.print_test_results(io_ctx.stdout, o_ts, 1)
+    else
+        c = IOCapture.capture() do
+            Test.print_test_results(o_ts, 1)
+        end
+        print(io_ctx.stdout, c.output)
+    end
     if (VERSION >= v"1.13.0-DEV.1037" && !Test.anynonpass(o_ts)) ||
             (VERSION < v"1.13.0-DEV.1037" && !o_ts.anynonpass)
-        println("    \033[32;1mSUCCESS\033[0m")
+        println(io_ctx.stdout, "    \033[32;1mSUCCESS\033[0m")
     else
-        println("    \033[31;1mFAILURE\033[0m\n")
-        Test.print_test_errors(o_ts)
+        println(io_ctx.stderr, "    \033[31;1mFAILURE\033[0m\n")
+        if VERSION >= v"1.13.0-DEV.1033"
+            Test.print_test_errors(io_ctx.stdout, o_ts)
+        else
+            c = IOCapture.capture() do
+                Test.print_test_errors(o_ts)
+            end
+            print(io_ctx.stdout, c.output)
+        end
         throw(Test.FallbackTestSetException("Test run finished with errors"))
     end
     return nothing
