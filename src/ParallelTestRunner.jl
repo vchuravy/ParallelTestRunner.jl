@@ -467,6 +467,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     results = []
     tasks = Task[]
     running_tests = Dict{String, Tuple{Int, Float64}}()  # test => (worker, start_time)
+    test_lock = ReentrantLock() # to protect crucial access to tests and running_tests
 
     done = false
     function stop_work()
@@ -666,12 +667,17 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 end
 
                 # get a test to run
-                test = popfirst!(tests)
-                wrkr = something(test_worker(test), p)
+                test, wrkr, test_t0 = Base.@lock test_lock begin
+                    test = popfirst!(tests)
+                    wrkr = something(test_worker(test), p)
+
+                    test_t0 = time()
+                    running_tests[test] = (wrkr, test_t0)
+
+                    test, wrkr, test_t0
+                end
 
                 # run the test
-                test_t0 = time()
-                running_tests[test] = (wrkr, test_t0)
                 put!(printer_channel, (:started, test, wrkr))
                 resp = try
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
@@ -728,7 +734,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             if any(istaskfailed, tasks)
                 println(io_ctx.stderr, "\nCaught an error, stopping...")
                 break
-            elseif done || (isempty(tests) && isempty(running_tests))
+            elseif done || Base.@lock(test_lock, isempty(tests) && isempty(running_tests))
                 break
             end
             sleep(1)
