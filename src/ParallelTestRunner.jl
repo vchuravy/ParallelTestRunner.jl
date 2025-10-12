@@ -438,7 +438,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 printstyled(name, color = :white)
                 printstyled(
                     lpad("($wrkr)", name_align - textwidth(name) + 1, " "), " |",
-                    " "^elapsed_align, "started at $(now())\n", color = :white
+                    " "^elapsed_align, "started at $(now())\n", color = :light_black
                 )
             finally
                 unlock(print_lock)
