@@ -7,12 +7,12 @@ using Test, IOCapture
     println()
     println("Showing the output of one test run:")
     println("-"^80)
-    c = IOCapture.capture(passthrough=true) do
+    c = IOCapture.capture(passthrough=true, color=true) do
         runtests(["--verbose"])
     end
     println("-"^80)
     println()
-    @test contains(c.output, r"basic .+ started at")
+    @test contains(c.output, r"basic.*started at")
     @test contains(c.output, "SUCCESS")
 end
 
