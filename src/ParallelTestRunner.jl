@@ -544,6 +544,10 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
     function update_status()
+        # only draw the status bar on actual terminals
+        stdout isa Base.TTY || return
+
+        # only draw if we have something to show
         isempty(running_tests) && return
         completed = length(results)
         total = completed + length(tests) + length(running_tests)
