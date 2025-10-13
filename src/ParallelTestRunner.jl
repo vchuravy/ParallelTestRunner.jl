@@ -671,7 +671,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             while length(tests) > 0 && !done
                 # if a worker failed, spawn a new one
                 if p === nothing
-                    p = addworkers(1)[1]
+                    p = addworker()
                 end
 
                 # get a test to run
