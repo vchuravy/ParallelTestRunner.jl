@@ -358,7 +358,13 @@ function recycle_worker(p)
 end
 
 """
-    runtests(mod::Module, ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
+    runtests(mod::Module, ARGS; RecordType = TestRecord,
+                                test_filter = Returns(true),
+                                custom_tests = Dict(),
+                                init_code = :(),
+                                test_worker = Returns(nothing),
+                                stdout = Base.stdout,
+                                stderr = Base.stderr)
 
 Run Julia tests in parallel across multiple worker processes.
 
@@ -370,13 +376,14 @@ Run Julia tests in parallel across multiple worker processes.
 
 Several keyword arguments are also supported:
 
-- `testfilter`: Optional function to filter which tests to run (default: run all tests)
 - `RecordType`: Type of test record to use for tracking test results (default: `TestRecord`)
+- `test_filter`: Optional function to filter which tests to run (default: run all tests)
 - `custom_tests`: Optional dictionary of custom tests, mapping test names to expressions.
 - `init_code`: Code use to initialize each test's sandbox module (e.g., import auxiliary
   packages, define constants, etc).
 - `test_worker`: Optional function that takes a test name and returns a specific worker.
   When returning `nothing`, the test will be assigned to any available default worker.
+- `stdout` and `stderr`: I/O streams to write to (default: `Base.stdout` and `Base.stderr`)
 
 ## Command Line Options
 
@@ -386,7 +393,6 @@ Several keyword arguments are also supported:
 - `--quickfail`: Stop the entire test run as soon as any test fails
 - `--jobs=N`: Use N worker processes (default: based on CPU threads and available memory)
 - `TESTS...`: Filter tests by name, matched using `startswith`
-- `stdout` and `stderr`: I/O streams to write to (default: `Base.stdout` and `Base.stderr`)
 
 ## Behavior
 
@@ -408,7 +414,7 @@ runtests(MyModule, ARGS)
 runtests(MyModule, ["integration"])
 
 # Run with custom filter function
-runtests(MyModule, ARGS; testfilter = test -> occursin("unit", test))
+runtests(MyModule, ARGS; test_filter = test -> occursin("unit", test))
 
 # Use custom test record type
 runtests(MyModule, ARGS; RecordType = MyCustomTestRecord)
@@ -419,7 +425,7 @@ runtests(MyModule, ARGS; RecordType = MyCustomTestRecord)
 Workers are automatically recycled when they exceed memory limits to prevent out-of-memory
 issues during long test runs. The memory limit is set based on system architecture.
 """
-function runtests(mod::Module, ARGS; testfilter = Returns(true), RecordType = TestRecord,
+function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = TestRecord,
                   custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
                   test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
     #
@@ -512,7 +518,7 @@ function runtests(mod::Module, ARGS; testfilter = Returns(true), RecordType = Te
 
     # filter tests
     if isempty(ARGS)
-        filter!(testfilter, tests)
+        filter!(test_filter, tests)
     else
         # let the user filter
         filter!(tests) do test
