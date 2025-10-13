@@ -4,7 +4,6 @@ export runtests, addworkers, addworker
 
 using Distributed
 using Dates
-import REPL
 using Printf: @sprintf
 using Base.Filesystem: path_separator
 import Test
@@ -423,9 +422,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
     # list tests, if requested
     if do_list
-        println("Available tests:")
+        println(stdout, "Available tests:")
         for test in sort(tests)
-            println(" - $test")
+            println(stdout, " - $test")
         end
         exit(0)
     end
@@ -451,7 +450,6 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
     t0 = time()
     results = []
-    tasks = Task[]
     running_tests = Dict{String, Tuple{Int, Float64}}()  # test => (worker, start_time)
     test_lock = ReentrantLock() # to protect crucial access to tests and running_tests
 
@@ -459,40 +457,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     function stop_work()
         if !done
             done = true
-            for task in tasks
+            for task in worker_tasks
                 task == current_task() && continue
                 Base.istaskdone(task) && continue
                 try; schedule(task, InterruptException(); error=true); catch; end
             end
         end
     end
-
-
-    #
-    # input
-    #
-
-    # Keyboard monitor (for more reliable CTRL-C handling)
-    if isa(stdin, Base.TTY)
-        # NOTE: this should be the first task; we really want it to complete
-        pushfirst!(tasks, @async begin
-            term = REPL.Terminals.TTYTerminal("xterm", stdin, stdout, stderr)
-            REPL.Terminals.raw!(term, true)
-            try
-                while !done
-                    c = read(term, Char)
-                    if c == '\x3'
-                        println(stderr, "\nCaught interrupt, stopping...")
-                        stop_work()
-                        break
-                    end
-                end
-            finally
-                REPL.Terminals.raw!(term, false)
-            end
-        end)
-    end
-    # TODO: we have to be _fast_ here, as Pkg.jl only gives us 4 seconds to clean up
 
 
     #
@@ -626,6 +597,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 sleep(0.1)
             end
         catch ex
+            if isa(ex, InterruptException)
+                # the printer should keep on running,
+                # but we need to signal other tasks to stop
+                stop_work()
+            else
+                rethrow()
+            end
             isa(ex, InterruptException) || rethrow()
         finally
             if isempty(tests) && isempty(running_tests)
@@ -641,8 +619,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     # execution
     #
 
+    worker_tasks = Task[]
     for p in workers()
-        push!(tasks, @async begin
+        push!(worker_tasks, @async begin
             while length(tests) > 0 && !done
                 # if a worker failed, spawn a new one
                 if p === nothing
@@ -665,7 +644,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 result = try
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
                 catch ex
-                    isa(ex, InterruptException) && return
+                    if isa(ex, InterruptException)
+                        # the worker got interrupted, signal other tasks to stop
+                        stop_work()
+                        return
+                    end
+
+                    # return any other exception as the result
                     # XXX: also put this in a test record?
                     ex
                 end
@@ -700,10 +685,6 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
                 delete!(running_tests, test)
             end
-
-            if p !== nothing
-                recycle_worker(p)
-            end
         end)
     end
 
@@ -712,10 +693,10 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     # finalization
     #
 
-    # monitor tasks for failure so that each one doesn't need a try/catch + stop_work()
+    # monitor worker tasks for failure so that each one doesn't need a try/catch + stop_work()
     try
         while true
-            if any(istaskfailed, tasks)
+            if any(istaskfailed, worker_tasks)
                 println(io_ctx.stderr, "\nCaught an error, stopping...")
                 break
             elseif done || Base.@lock(test_lock, isempty(tests) && isempty(running_tests))
@@ -729,10 +710,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     finally
         stop_work()
     end
-    ## `wait()` to actually catch any exceptions
+
+    # wait for the printer to finish so that all results have been printed
     close(printer_channel)
     wait(printer_task)
-    for task in tasks
+
+    # wait for worker tasks to catch unhandled exceptions
+    for task in worker_tasks
         try
             wait(task)
         catch err
@@ -744,6 +728,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             isa(err, InterruptException) || rethrow()
         end
     end
+    @async rmprocs(; waitfor=0)
 
     # print the output generated by each testset
     for (testname, result, start, stop) in results
@@ -881,7 +866,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
         throw(Test.FallbackTestSetException("Test run finished with errors"))
     end
-    return nothing
+
+    return
 end # runtests
 
 end # module ParallelTestRunner
