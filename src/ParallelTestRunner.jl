@@ -111,11 +111,11 @@ end
 function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
     lock(ctx.lock)
     try
-        printstyled(ctx.stdout, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
-        printstyled(ctx.stdout, "         | ---------------- CPU ---------------- |\n", color = :white)
+        printstyled(ctx.stdout, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " │ ")
+        printstyled(ctx.stdout, "         │ ──────────────── CPU ──────────────── │\n", color = :white)
         printstyled(ctx.stdout, testgroupheader, color = :white)
-        printstyled(ctx.stdout, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-        printstyled(ctx.stdout, "Time (s) | GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
+        printstyled(ctx.stdout, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " │ ", color = :white)
+        printstyled(ctx.stdout, "Time (s) │ GC (s) │ GC % │ Alloc (MB) │ RSS (MB) │\n", color = :white)
         flush(ctx.stdout)
     finally
         unlock(ctx.lock)
@@ -125,7 +125,7 @@ end
 function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
-        printstyled(ctx.stdout, test, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |", color = :white)
+        printstyled(ctx.stdout, test, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " │", color = :white)
         printstyled(
             ctx.stdout,
             " "^ctx.elapsed_align, "started at $(now())\n", color = :light_black
@@ -140,23 +140,19 @@ function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stdout, test, color = :white)
-        printstyled(ctx.stdout, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " │ ", color = :white)
         time_str = @sprintf("%7.2f", record.time)
-        printstyled(ctx.stdout, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(time_str, ctx.elapsed_align, " "), " │ ", color = :white)
 
         gc_str = @sprintf("%5.2f", record.gctime)
-        printstyled(ctx.stdout, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(gc_str, ctx.gc_align, " "), " │ ", color = :white)
         percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
-        printstyled(ctx.stdout, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(percent_str, ctx.percent_align, " "), " │ ", color = :white)
         alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
-        printstyled(ctx.stdout, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(alloc_str, ctx.alloc_align, " "), " │ ", color = :white)
 
         rss_str = @sprintf("%5.2f", record.rss / 2^20)
-        printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
-
-        for line in eachline(IOBuffer(record.output))
-            println(ctx.stdout, " "^(ctx.name_align + 2), "| ", line)
-        end
+        printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " │\n", color = :white)
 
         flush(ctx.stdout)
     finally
@@ -199,24 +195,24 @@ function runtest(::Type{TestRecord}, f, name, init_code)
             GC.gc(true)
             Random.seed!(1)
 
-            res = @timed IOCapture.capture() do
+            stats = @timed IOCapture.capture() do
                 @testset $name begin
                     $f
                 end
             end
-            captured = res.value
-            (; testset=captured.value, captured.output, res.time, res.bytes, res.gctime)
+            captured = stats.value
+            (; testset=captured.value, captured.output, stats.time, stats.bytes, stats.gctime)
         end
 
         # process results
         rss = Sys.maxrss()
-        res = TestRecord(data..., rss)
+        record = TestRecord(data..., rss)
 
         GC.gc(true)
-        return res
+        return record
     end
 
-    res = @static if VERSION >= v"1.13.0-DEV.1044"
+    @static if VERSION >= v"1.13.0-DEV.1044"
         @with Test.TESTSET_PRINT_ENABLE => false begin
             inner()
         end
@@ -229,7 +225,6 @@ function runtest(::Type{TestRecord}, f, name, init_code)
             Test.TESTSET_PRINT_ENABLE[] = old_print_setting
         end
     end
-    return res
 end
 
 # This is an internal function, not to be used by end users.  The keyword
@@ -667,26 +662,27 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
                 # run the test
                 put!(printer_channel, (:started, test, wrkr))
-                resp = try
+                result = try
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
-                catch e
-                    isa(e, InterruptException) && return
-                    Any[e]
+                catch ex
+                    isa(ex, InterruptException) && return
+                    # XXX: also put this in a test record?
+                    ex
                 end
                 test_t1 = time()
-                push!(results, (test, resp, test_t0, test_t1))
+                push!(results, (test, result, test_t0, test_t1))
 
                 # act on the results
-                if resp isa AbstractTestRecord
-                    put!(printer_channel, (:finished, test, wrkr, resp::RecordType))
+                if result isa AbstractTestRecord
+                    put!(printer_channel, (:finished, test, wrkr, result::RecordType))
 
-                    if memory_usage(resp) > max_worker_rss
+                    if memory_usage(result) > max_worker_rss
                         # the worker has reached the max-rss limit, recycle it
                         # so future tests start with a smaller working set
                         p = recycle_worker(p)
                     end
                 else
-                    @assert resp[1] isa Exception
+                    @assert result isa Exception
                     put!(printer_channel, (:errored, test, wrkr))
                     if do_quickfail
                         stop_work()
@@ -749,6 +745,27 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
 
+    # print the output generated by each testset
+    for (testname, result, start, stop) in results
+        if isa(result, AbstractTestRecord) && !isempty(result.output)
+            println(io_ctx.stdout, "\nOutput generated during execution of '$testname':")
+            lines = collect(eachline(IOBuffer(result.output)))
+
+            for (i,line) in enumerate(lines)
+                prefix = if length(lines) == 1
+                    "["
+                elseif i == 1
+                    "┌"
+                elseif i == length(lines)
+                    "└"
+                else
+                    "│"
+                end
+                println(io_ctx.stdout, prefix, " ", line)
+            end
+        end
+    end
+
     # construct a testset to render the test results
     function create_testset(name; start=nothing, stop=nothing, kwargs...)
         if start === nothing
@@ -780,47 +797,42 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     o_ts = create_testset("Overall"; start=t0, stop=t1, verbose=do_verbose)
     with_testset(o_ts) do
         completed_tests = Set{String}()
-        for (testname, res, start, stop) in results
-            if res isa AbstractTestRecord
-                resp = res.test
-            else
-                resp = res[1]
-            end
+        for (testname, result, start, stop) in results
             push!(completed_tests, testname)
 
             # decode or fake a testset
-            if isa(resp, Test.DefaultTestSet)
-                testset = resp
+            if isa(result, AbstractTestRecord)
+                testset = result.test
             else
                 testset = create_testset(testname; start, stop)
-                if isa(resp, RemoteException) &&
-                       isa(resp.captured.ex, Test.TestSetException)
-                    println(io_ctx.stderr, "Worker $(resp.pid) failed running test $(testname):")
-                    Base.showerror(io_ctx.stderr, resp.captured)
+                if isa(result, RemoteException) &&
+                       isa(result.captured.ex, Test.TestSetException)
+                    println(io_ctx.stderr, "Worker $(result.pid) failed running test $(testname):")
+                    Base.showerror(io_ctx.stderr, result.captured)
                     println(io_ctx.stderr)
 
                     c = IOCapture.capture() do
-                        for i in 1:resp.captured.ex.pass
+                        for i in 1:result.captured.ex.pass
                             Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, nothing))
                         end
-                        for i in 1:resp.captured.ex.broken
+                        for i in 1:result.captured.ex.broken
                             Test.record(testset, Test.Broken(:test, nothing))
                         end
-                        for t in resp.captured.ex.errors_and_fails
+                        for t in result.captured.ex.errors_and_fails
                             Test.record(testset, t)
                         end
                     end
                     print(io_ctx.stdout, c.output)
                 else
-                    if !isa(resp, Exception)
-                        resp = ErrorException(string("Unknown result type : ", typeof(resp)))
+                    if !isa(result, Exception)
+                        result = ErrorException(string("Unknown result type : ", typeof(result)))
                     end
                     # If this test raised an exception that is not a remote testset exception,
                     # i.e. not a RemoteException capturing a TestSetException that means
                     # the test runner itself had some problem, so we may have hit a segfault,
                     # deserialization errors or something similar.  Record this testset as Errored.
                     c = IOCapture.capture() do
-                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
+                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = result, backtrace = [])]), LineNumberNode(1)))
                     end
                     print(io_ctx.stdout, c.output)
                 end
