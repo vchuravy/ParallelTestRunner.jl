@@ -317,6 +317,7 @@ end
 function save_test_history(mod::Module, history::Dict{String, Float64})
     history_file = get_history_file(mod)
     try
+        mkpath(dirname(history_file))
         serialize(history_file, history)
     catch e
         @warn "Failed to save test history to $history_file" exception=e
