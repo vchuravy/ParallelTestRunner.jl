@@ -165,15 +165,23 @@ function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
     end
 end
 
-function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext, test_time)
     lock(ctx.lock)
     try
         printstyled(ctx.stderr, test, color = :red)
         printstyled(
             ctx.stderr,
-            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
-            " "^ctx.elapsed_align, " failed at $(now())\n", color = :red
+            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |"
+            , color = :red
         )
+        time_str = @sprintf("%7.2f", test_time)
+        printstyled(ctx.stderr, lpad(time_str, ctx.elapsed_align + 1, " "), " │", color = :red)
+
+        failed_str = "failed at $(now())\n"
+        # 11 -> 3 from " | " 3x and 2 for each " " on either side
+        fail_align = (11 + ctx.gc_align + ctx.percent_align + ctx.alloc_align + ctx.rss_align - textwidth(failed_str)) ÷ 2 + textwidth(failed_str)
+        failed_str = lpad(failed_str, fail_align, " ")
+        printstyled(ctx.stderr, failed_str, color = :red)
 
         flush(ctx.stderr)
     finally
@@ -684,10 +692,10 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         print_test_finished(test_name, wrkr, record, io_ctx)
 
                     elseif msg_type == :errored
-                        test_name, wrkr = msg[2], msg[3]
+                        test_name, wrkr, test_time = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        print_test_errorred(RecordType, wrkr, test_name, io_ctx)
+                        print_test_errorred(RecordType, wrkr, test_name, io_ctx, test_time)
                     end
                 end
 
@@ -773,7 +781,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     end
                 else
                     @assert result isa Exception
-                    put!(printer_channel, (:errored, test, wrkr))
+                    put!(printer_channel, (:errored, test, wrkr, test_t1-test_t0))
                     if do_quickfail
                         stop_work()
                     end
