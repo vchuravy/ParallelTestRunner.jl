@@ -6,6 +6,7 @@ using Distributed
 using Dates
 using Printf: @sprintf
 using Base.Filesystem: path_separator
+using Statistics
 import Test
 import Random
 import IOCapture
@@ -416,9 +417,9 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             end
         end
     end
-    sort!(tests; by = (file) -> stat(joinpath(WORKDIR, file * ".jl")).size, rev = true)
     ## finalize
     unique!(tests)
+    Random.shuffle!(tests)
 
     # list tests, if requested
     if do_list
@@ -443,9 +444,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     if !set_jobs
         jobs = default_njobs()
     end
+    jobs = clamp(jobs, 1, length(tests))
     println(stdout, "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable.")
-
-    # add workers
     addworkers(min(jobs, length(tests)))
 
     t0 = time()
@@ -532,11 +532,23 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         # line 3: progress + ETA
         line3 = "Progress: $completed/$total tests completed"
         if completed > 0
-            elapsed_so_far = time() - t0
-            avg_time_per_test = elapsed_so_far / completed
-            remaining_tests = length(tests) + length(running_tests)
-            eta_seconds = avg_time_per_test * remaining_tests
-            eta_mins = round(Int, eta_seconds / 60)
+            # gather stats
+            durations_done = [end_time - start_time for (_, _, start_time, end_time) in results]
+            durations_running = [time() - start_time for (_, start_time) in values(running_tests)]
+            n_done = length(durations_done)
+            n_running = length(durations_running)
+            n_remaining = length(tests)
+            n_total = n_done + n_running + n_remaining
+
+            # estimate per-test time (slightly pessimistic)
+            μ = mean(durations_done)
+            σ = length(durations_done) > 1 ? std(durations_done) : 0.0
+            est_per_test = μ + 0.5σ
+
+            # estimate remaining time
+            est_remaining = sum(durations_running) + n_remaining * est_per_test
+            eta_sec = est_remaining / jobs
+            eta_mins = round(Int, eta_sec / 60)
             line3 *= " | ETA: ~$eta_mins min"
         end
 
