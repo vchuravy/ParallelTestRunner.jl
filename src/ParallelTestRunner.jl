@@ -67,6 +67,7 @@ abstract type AbstractTestRecord end
 
 struct TestRecord <: AbstractTestRecord
     test::Any
+    output::String
     time::Float64
     bytes::UInt64
     gctime::Float64
@@ -154,6 +155,10 @@ function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
         rss_str = @sprintf("%5.2f", record.rss / 2^20)
         printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
 
+        for line in eachline(IOBuffer(record.output))
+            println(ctx.stdout, " "^(ctx.name_align + 2), "| ", line)
+        end
+
         flush(ctx.stdout)
     finally
         unlock(ctx.lock)
@@ -186,34 +191,39 @@ function runtest(::Type{TestRecord}, f, name, init_code)
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
         mod = @eval(Main, module $mod_name end)
-        @eval(mod, import ParallelTestRunner: Test, Random)
+        @eval(mod, import ParallelTestRunner: Test, Random, IOCapture)
         @eval(mod, using .Test, .Random)
 
         Core.eval(mod, init_code)
+
         data = @eval mod begin
             GC.gc(true)
             Random.seed!(1)
 
-            res = @timed @testset $name begin
-                $f
+            res = @timed IOCapture.capture() do
+                @testset $name begin
+                    $f
+                end
             end
-            (; res.value, res.time, res.bytes, res.gctime)
+            captured = res.value
+            (; testset=captured.value, captured.output, res.time, res.bytes, res.gctime)
         end
 
         # process results
         rss = Sys.maxrss()
         if VERSION >= v"1.11.0-DEV.1529"
-            tc = Test.get_test_counts(data.value)
+            tc = Test.get_test_counts(data.testset)
             passes, fails, error, broken, c_passes, c_fails, c_errors, c_broken =
                 tc.passes, tc.fails, tc.errors, tc.broken, tc.cumulative_passes,
                 tc.cumulative_fails, tc.cumulative_errors, tc.cumulative_broken
         else
             passes, fails, errors, broken, c_passes, c_fails, c_errors, c_broken =
-                Test.get_test_counts(data.value)
+                Test.get_test_counts(data.testset)
         end
-        if data[1].anynonpass == false
-            data = (
-                (passes + c_passes, broken + c_broken),
+        if !data.testset.anynonpass
+            data = (;
+                result=(passes + c_passes, broken + c_broken),
+                data.output,
                 data.time,
                 data.bytes,
                 data.gctime,
@@ -536,19 +546,18 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     print_header(RecordType, io_ctx, testgroupheader, workerheader)
 
     status_lines_visible = Ref(0)
+
     function clear_status()
         if status_lines_visible[] > 0
-            for i in 1:status_lines_visible[]
-                width = displaysize(io_ctx.stdout)[2]
-                print(io_ctx.stdout, "\r", " "^width, "\r")
-                if i < status_lines_visible[]
-                    print(io_ctx.stdout, "\033[1A")  # Move up
-                end
+            for i in 1:status_lines_visible[]-1
+                print(io_ctx.stdout, "\033[1A")  # Move up one line
+                print(io_ctx.stdout, "\033[2K")  # Clear entire line
             end
-            print(io_ctx.stdout, "\r")
+            print(io_ctx.stdout, "\r")  # Move to start of line
             status_lines_visible[] = 0
         end
     end
+
     function update_status()
         # only draw the status bar on actual terminals
         io_ctx.stdout isa Base.TTY || return
@@ -636,7 +645,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 end
 
                 # After a while, display a status line
-                if time() - t0 >= 5 && (got_message || (time() - last_status_update[] >= 1))
+                if !done && time() - t0 >= 5 && (got_message || (time() - last_status_update[] >= 1))
                     update_status()
                     last_status_update[] = time()
                 end
@@ -847,7 +856,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             c = IOCapture.capture() do
                 Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
             end
-            print(io_ctx.stdout, c.output)
+            # don't print the output of interrupted tests, it's not useful
             with_testset(fake) do
                 Test.record(o_ts, fake)
             end

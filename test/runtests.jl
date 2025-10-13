@@ -112,4 +112,20 @@ end
     @test contains(str, "This test throws an error")
 end
 
+@testset "test output" begin
+    custom_tests = Dict(
+        "output" => quote
+            println("This is some output from the test")
+        end
+    )
+
+    io = IOBuffer()
+    runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+
+    str = String(take!(io))
+    @test contains(str, r"output .+ started at")
+    @test contains(str, r"This is some output from the test")
+    @test contains(str, "SUCCESS")
+end
+
 end
