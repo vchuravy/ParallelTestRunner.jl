@@ -608,12 +608,12 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     # (:errored, test_name, worker_id)
     printer_channel = Channel{Tuple}(100)
 
-    push!(tasks, @async begin
+    printer_task = @async begin
         last_status_update = Ref(time())
         try
             # XXX: it's possible this task doesn't run, not processing results,
             #      while the execution runners have exited...
-            while !done
+            while isopen(printer_channel)
                 got_message = false
                 while isready(printer_channel)
                     # Try to get a message from the channel (with timeout)
@@ -660,7 +660,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 clear_status()
             end
         end
-    end)
+    end
 
 
     #
@@ -755,6 +755,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         stop_work()
     end
     ## `wait()` to actually catch any exceptions
+    close(printer_channel)
+    wait(printer_task)
     for task in tasks
         try
             wait(task)
