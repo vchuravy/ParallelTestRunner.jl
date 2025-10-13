@@ -20,6 +20,8 @@ cd(@__DIR__)
 
     @test contains(str, r"basic .+ started at")
     @test contains(str, "SUCCESS")
+
+    @test isfile(ParallelTestRunner.get_history_file(ParallelTestRunner))
 end
 
 @testset "custom tests and init code" begin
