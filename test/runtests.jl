@@ -113,6 +113,26 @@ end
     @test contains(str, "This test throws an error")
 end
 
+@testset "crashing test" begin
+    custom_tests = Dict(
+        "crash" => quote
+            abort() = ccall(:abort, Nothing, ())
+            abort()
+        end
+    )
+
+    io = IOBuffer()
+    @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
+        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+    end
+
+    str = String(take!(io))
+    @test contains(str, r"crash .+ started at")
+    @test contains(str, "FAILURE")
+    @test contains(str, "Error During Test")
+    @test contains(str, "ProcessExitedException")
+end
+
 @testset "test output" begin
     custom_tests = Dict(
         "output" => quote

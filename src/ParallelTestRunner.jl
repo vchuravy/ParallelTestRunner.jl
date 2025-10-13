@@ -751,7 +751,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
 
-    # construct a testset to render the test results
+    # construct a testset containing all results
     function create_testset(name; start=nothing, stop=nothing, kwargs...)
         if start === nothing
             testset = Test.DefaultTestSet(name; kwargs...)
@@ -780,25 +780,21 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     end
     t1 = time()
     o_ts = create_testset("Overall"; start=t0, stop=t1, verbose=do_verbose)
-    with_testset(o_ts) do
-        completed_tests = Set{String}()
-        for (testname, result, start, stop) in results
-            push!(completed_tests, testname)
+    function collect_results()
+        with_testset(o_ts) do
+            completed_tests = Set{String}()
+            for (testname, result, start, stop) in results
+                push!(completed_tests, testname)
 
-            # decode or fake a testset
-            if isa(result, AbstractTestRecord)
-                testset = result.test
-            else
-                testset = create_testset(testname; start, stop)
-                if isa(result, RemoteException) &&
-                       isa(result.captured.ex, Test.TestSetException)
-                    println(io_ctx.stderr, "Worker $(result.pid) failed running test $(testname):")
-                    Base.showerror(io_ctx.stderr, result.captured)
-                    println(io_ctx.stderr)
-
-                    c = IOCapture.capture() do
+                # decode or fake a testset
+                if isa(result, AbstractTestRecord)
+                    testset = result.test
+                else
+                    testset = create_testset(testname; start, stop)
+                    if isa(result, RemoteException) &&
+                           isa(result.captured.ex, Test.TestSetException)
                         for i in 1:result.captured.ex.pass
-                            Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, nothing))
+                            Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, LineNumberNode(@__LINE__, @__FILE__)))
                         end
                         for i in 1:result.captured.ex.broken
                             Test.record(testset, Test.Broken(:test, nothing))
@@ -806,42 +802,49 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                         for t in result.captured.ex.errors_and_fails
                             Test.record(testset, t)
                         end
+                    else
+                        if !isa(result, Exception)
+                            result = ErrorException(string("Unknown result type : ", typeof(result)))
+                        end
+                        # If this test raised an exception that is not a remote testset exception,
+                        # i.e. not a RemoteException capturing a TestSetException that means
+                        # the test runner itself had some problem, so we may have hit a segfault,
+                        # deserialization errors or something similar.  Record this testset as Errored.
+                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
                     end
-                    print(io_ctx.stdout, c.output)
-                else
-                    if !isa(result, Exception)
-                        result = ErrorException(string("Unknown result type : ", typeof(result)))
-                    end
-                    # If this test raised an exception that is not a remote testset exception,
-                    # i.e. not a RemoteException capturing a TestSetException that means
-                    # the test runner itself had some problem, so we may have hit a segfault,
-                    # deserialization errors or something similar.  Record this testset as Errored.
-                    c = IOCapture.capture() do
-                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = result, backtrace = [])]), LineNumberNode(1)))
-                    end
-                    print(io_ctx.stdout, c.output)
+                end
+
+                with_testset(testset) do
+                    Test.record(o_ts, testset)
                 end
             end
 
-            # record the testset
-            with_testset(testset) do
-                Test.record(o_ts, testset)
-            end
-        end
-
-        # mark remaining or running tests as interrupted
-        for test in [tests; collect(keys(running_tests))]
-            (test in completed_tests) && continue
-            testset = create_testset(test)
-            c = IOCapture.capture() do
-                Test.record(testset, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
-            end
-            # don't print the output of interrupted tests, it's not useful
-            with_testset(testset) do
-                Test.record(o_ts, testset)
+            # mark remaining or running tests as interrupted
+            for test in [tests; collect(keys(running_tests))]
+                (test in completed_tests) && continue
+                testset = create_testset(test)
+                Test.record(testset, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack(NamedTuple[(;exception = "skipped", backtrace = [])]), LineNumberNode(1)))
+                with_testset(testset) do
+                    Test.record(o_ts, testset)
+                end
             end
         end
     end
+    @static if VERSION >= v"1.13.0-DEV.1044"
+        @with Test.TESTSET_PRINT_ENABLE => false begin
+            collect_results()
+        end
+    else
+        old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+        Test.TESTSET_PRINT_ENABLE[] = false
+        try
+            collect_results()
+        finally
+            Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+        end
+    end
+
+    # display the results
     println(io_ctx.stdout)
     if VERSION >= v"1.13.0-DEV.1033"
         Test.print_test_results(io_ctx.stdout, o_ts, 1)
