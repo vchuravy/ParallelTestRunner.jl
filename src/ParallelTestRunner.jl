@@ -266,13 +266,7 @@ function addworkers(X; kwargs...)
     exeflags = exe[2:end]
 
     return withenv("JULIA_NUM_THREADS" => 1, "OPENBLAS_NUM_THREADS" => 1) do
-        procs = addprocs(X; exename, exeflags, kwargs...)
-        Distributed.remotecall_eval(
-            Main, procs, quote
-                import ParallelTestRunner
-            end
-        )
-        procs
+        addprocs(X; exename, exeflags, kwargs...)
     end
 end
 addworker(; kwargs...) = addworkers(1; kwargs...)[1]
@@ -658,6 +652,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # run the test
                 put!(printer_channel, (:started, test, wrkr))
                 result = try
+                    Distributed.remotecall_eval(Main, wrkr, :(import ParallelTestRunner))
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test,
                                               init_code, io_ctx.color)
                 catch ex
