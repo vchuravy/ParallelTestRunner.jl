@@ -8,7 +8,7 @@ cd(@__DIR__)
 @testset "basic test" begin
     io = IOBuffer()
     io_color = IOContext(io, :color => true)
-    runtests(["--verbose"]; stdout=io_color, stderr=io_color)
+    runtests(ParallelTestRunner, ["--verbose"]; stdout=io_color, stderr=io_color)
     str = String(take!(io))
 
     println()
@@ -39,7 +39,7 @@ end
     )
 
     io = IOBuffer()
-    runtests(["--verbose"]; init_code, custom_tests, stdout=io, stderr=io)
+    runtests(ParallelTestRunner, ["--verbose"]; init_code, custom_tests, stdout=io, stderr=io)
 
     str = String(take!(io))
     @test contains(str, r"basic .+ started at")
@@ -64,7 +64,7 @@ end
     )
 
     io = IOBuffer()
-    runtests(["--verbose"]; test_worker, custom_tests, stdout=io, stderr=io)
+    runtests(ParallelTestRunner, ["--verbose"]; test_worker, custom_tests, stdout=io, stderr=io)
 
     str = String(take!(io))
     @test contains(str, r"basic .+ started at")
@@ -82,7 +82,7 @@ end
 
     io = IOBuffer()
     @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
-        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+        runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
 
     str = String(take!(io))
@@ -102,7 +102,7 @@ end
 
     io = IOBuffer()
     @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
-        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+        runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
 
     str = String(take!(io))
@@ -123,7 +123,7 @@ end
 
     io = IOBuffer()
     @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
-        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+        runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
 
     str = String(take!(io))
@@ -141,7 +141,7 @@ end
     )
 
     io = IOBuffer()
-    runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+    runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
 
     str = String(take!(io))
     @test contains(str, r"output .+ started at")

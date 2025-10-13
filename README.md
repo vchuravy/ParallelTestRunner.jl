@@ -30,7 +30,7 @@ Then in your `test/runtests.jl` add:
 ```julia
 using ParallelTestRunner
 
-runtests(ARGS)
+runtests(MyModule, ARGS)
 ```
 
 ### Filtering
@@ -45,7 +45,7 @@ function testfilter(test)
     return true
 end
 
-runtests(ARGS; testfilter)
+runtests(MyModule, ARGS; testfilter)
 ```
 
 ### Provide defaults
@@ -59,7 +59,7 @@ const init_code = quote
    using MyPackage
 end
 
-runtests(ARGS; init_code)
+runtests(MyModule, ARGS; init_code)
 ```
 
 ## Packages using ParallelTestRunner.jl
