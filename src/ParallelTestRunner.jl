@@ -4,11 +4,12 @@ export runtests, addworkers, addworker
 
 using Distributed
 using Dates
-import REPL
 using Printf: @sprintf
 using Base.Filesystem: path_separator
+using Statistics
 import Test
 import Random
+import IOCapture
 
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
@@ -66,6 +67,7 @@ abstract type AbstractTestRecord end
 
 struct TestRecord <: AbstractTestRecord
     test::Any
+    output::String
     time::Float64
     bytes::UInt64
     gctime::Float64
@@ -76,8 +78,15 @@ function memory_usage(rec::TestRecord)
     return rec.rss
 end
 
+
+#
+# overridable I/O context for pretty-printing
+#
+
 struct TestIOContext
-    io::IO
+    stdout::IO
+    stderr::IO
+    color::Bool
     lock::ReentrantLock
     name_align::Int
     elapsed_align::Int
@@ -87,102 +96,126 @@ struct TestIOContext
     rss_align::Int
 end
 
-function test_IOContext(::Type{TestRecord}, io::IO, lock::ReentrantLock, name_align::Int)
+function test_IOContext(::Type{TestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int)
     elapsed_align = textwidth("Time (s)")
     gc_align = textwidth("GC (s)")
     percent_align = textwidth("GC %")
     alloc_align = textwidth("Alloc (MB)")
     rss_align = textwidth("RSS (MB)")
 
+    color = get(stdout, :color, false)
+
     return TestIOContext(
-        io, lock, name_align, elapsed_align, gc_align, percent_align,
+        stdout, stderr, color, lock, name_align, elapsed_align, gc_align, percent_align,
         alloc_align, rss_align
     )
 end
 
 function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
-    printstyled(ctx.io, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " | ")
-    printstyled(ctx.io, "         | ---------------- CPU ---------------- |\n", color = :white)
-    printstyled(ctx.io, testgroupheader, color = :white)
-    printstyled(ctx.io, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " | ", color = :white)
-    printstyled(ctx.io, "Time (s) |  GC (s) | GC % | Alloc (MB) | RSS (MB) |\n", color = :white)
-    return nothing
+    lock(ctx.lock)
+    try
+        printstyled(ctx.stdout, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " │ ")
+        printstyled(ctx.stdout, "         │ ──────────────── CPU ──────────────── │\n", color = :white)
+        printstyled(ctx.stdout, testgroupheader, color = :white)
+        printstyled(ctx.stdout, lpad(workerheader, ctx.name_align - textwidth(testgroupheader) + 1), " │ ", color = :white)
+        printstyled(ctx.stdout, "Time (s) │ GC (s) │ GC % │ Alloc (MB) │ RSS (MB) │\n", color = :white)
+        flush(ctx.stdout)
+    finally
+        unlock(ctx.lock)
+    end
 end
 
-function print_testworker_stats(test, wrkr, record::TestRecord, ctx::TestIOContext)
+function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
-    return try
-        printstyled(ctx.io, test, color = :white)
-        printstyled(ctx.io, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " | ", color = :white)
+    try
+        printstyled(ctx.stdout, test, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " │", color = :white)
+        printstyled(
+            ctx.stdout,
+            " "^ctx.elapsed_align, "started at $(now())\n", color = :light_black
+        )
+        flush(ctx.stdout)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(ctx.stdout, test, color = :white)
+        printstyled(ctx.stdout, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " │ ", color = :white)
         time_str = @sprintf("%7.2f", record.time)
-        printstyled(ctx.io, lpad(time_str, ctx.elapsed_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(time_str, ctx.elapsed_align, " "), " │ ", color = :white)
 
         gc_str = @sprintf("%5.2f", record.gctime)
-        printstyled(ctx.io, lpad(gc_str, ctx.gc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(gc_str, ctx.gc_align, " "), " │ ", color = :white)
         percent_str = @sprintf("%4.1f", 100 * record.gctime / record.time)
-        printstyled(ctx.io, lpad(percent_str, ctx.percent_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(percent_str, ctx.percent_align, " "), " │ ", color = :white)
         alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
-        printstyled(ctx.io, lpad(alloc_str, ctx.alloc_align, " "), " | ", color = :white)
+        printstyled(ctx.stdout, lpad(alloc_str, ctx.alloc_align, " "), " │ ", color = :white)
 
         rss_str = @sprintf("%5.2f", record.rss / 2^20)
-        printstyled(ctx.io, lpad(rss_str, ctx.rss_align, " "), " |\n", color = :white)
+        printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " │\n", color = :white)
+
+        flush(ctx.stdout)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(ctx.stderr, test, color = :red)
+        printstyled(
+            ctx.stderr,
+            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
+            " "^ctx.elapsed_align, " failed at $(now())\n", color = :red
+        )
+
+        flush(ctx.stderr)
     finally
         unlock(ctx.lock)
     end
 end
 
 
-## entry point
+#
+# entry point
+#
 
-function runtest(::Type{TestRecord}, f, name, init_code)
+function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
         mod = @eval(Main, module $mod_name end)
-        @eval(mod, import ParallelTestRunner: Test, Random)
+        @eval(mod, import ParallelTestRunner: Test, Random, IOCapture)
         @eval(mod, using .Test, .Random)
 
-        let id = myid()
-            wait(@spawnat 1 print_testworker_started(name, id))
-        end
-
         Core.eval(mod, init_code)
+
         data = @eval mod begin
             GC.gc(true)
             Random.seed!(1)
 
-            res = @timed @testset $name begin
-                $f
+            stats = @timed IOCapture.capture(; color=$color) do
+                @testset $name begin
+                    $f
+                end
             end
-            (; res.value, res.time, res.bytes, res.gctime)
+            captured = stats.value
+            (; testset=captured.value, captured.output, stats.time, stats.bytes, stats.gctime)
         end
 
         # process results
         rss = Sys.maxrss()
-        if VERSION >= v"1.11.0-DEV.1529"
-            tc = Test.get_test_counts(data.value)
-            passes, fails, error, broken, c_passes, c_fails, c_errors, c_broken =
-                tc.passes, tc.fails, tc.errors, tc.broken, tc.cumulative_passes,
-                tc.cumulative_fails, tc.cumulative_errors, tc.cumulative_broken
-        else
-            passes, fails, errors, broken, c_passes, c_fails, c_errors, c_broken =
-                Test.get_test_counts(data.value)
-        end
-        if data[1].anynonpass == false
-            data = (
-                (passes + c_passes, broken + c_broken),
-                data.time,
-                data.bytes,
-                data.gctime,
-            )
-        end
-        res = TestRecord(data..., rss)
+        record = TestRecord(data..., rss)
 
         GC.gc(true)
-        return res
+        return record
     end
 
-    res = @static if VERSION >= v"1.13.0-DEV.1044"
+    @static if VERSION >= v"1.13.0-DEV.1044"
         @with Test.TESTSET_PRINT_ENABLE => false begin
             inner()
         end
@@ -195,7 +228,6 @@ function runtest(::Type{TestRecord}, f, name, init_code)
             Test.TESTSET_PRINT_ENABLE[] = old_print_setting
         end
     end
-    return res
 end
 
 # This is an internal function, not to be used by end users.  The keyword
@@ -234,16 +266,16 @@ function addworkers(X; kwargs...)
     exeflags = exe[2:end]
 
     return withenv("JULIA_NUM_THREADS" => 1, "OPENBLAS_NUM_THREADS" => 1) do
-        procs = addprocs(X; exename, exeflags, kwargs...)
-        Distributed.remotecall_eval(
-            Main, procs, quote
-                import ParallelTestRunner
-            end
-        )
-        procs
+        addprocs(X; exename, exeflags, kwargs...)
     end
 end
 addworker(; kwargs...) = addworkers(1; kwargs...)[1]
+
+function recycle_worker(p)
+    rmprocs(p, waitfor = 30)
+
+    return nothing
+end
 
 """
     runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
@@ -273,6 +305,7 @@ Several keyword arguments are also supported:
 - `--quickfail`: Stop the entire test run as soon as any test fails
 - `--jobs=N`: Use N worker processes (default: based on CPU threads and available memory)
 - `TESTS...`: Filter tests by name, matched using `startswith`
+- `stdout` and `stderr`: I/O streams to write to (default: `Base.stdout` and `Base.stderr`)
 
 ## Behavior
 
@@ -307,7 +340,11 @@ issues during long test runs. The memory limit is set based on system architectu
 """
 function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                   custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
-                  test_worker = Returns(nothing))
+                  test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
+    #
+    # set-up
+    #
+
     do_help, _ = extract_flag!(ARGS, "--help")
     if do_help
         println(
@@ -377,15 +414,15 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             end
         end
     end
-    sort!(tests; by = (file) -> stat(joinpath(WORKDIR, file * ".jl")).size, rev = true)
     ## finalize
     unique!(tests)
+    Random.shuffle!(tests)
 
     # list tests, if requested
     if do_list
-        println("Available tests:")
+        println(stdout, "Available tests:")
         for test in sort(tests)
-            println(" - $test")
+            println(stdout, " - $test")
         end
         exit(0)
     end
@@ -404,10 +441,31 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     if !set_jobs
         jobs = default_njobs()
     end
-    @info "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable."
-
-    # add workers
+    jobs = clamp(jobs, 1, length(tests))
+    println(stdout, "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable.")
     addworkers(min(jobs, length(tests)))
+
+    t0 = time()
+    results = []
+    running_tests = Dict{String, Tuple{Int, Float64}}()  # test => (worker, start_time)
+    test_lock = ReentrantLock() # to protect crucial access to tests and running_tests
+
+    done = false
+    function stop_work()
+        if !done
+            done = true
+            for task in worker_tasks
+                task == current_task() && continue
+                Base.istaskdone(task) && continue
+                try; schedule(task, InterruptException(); error=true); catch; end
+            end
+        end
+    end
+
+
+    #
+    # output
+    #
 
     # pretty print information about gc and mem usage
     testgroupheader = "Test"
@@ -428,246 +486,403 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         stderr.lock = print_lock
     end
 
-    io_ctx = test_IOContext(RecordType, stdout, print_lock, name_align)
+    io_ctx = test_IOContext(RecordType, stdout, stderr, print_lock, name_align)
     print_header(RecordType, io_ctx, testgroupheader, workerheader)
 
-    global print_testworker_started = (name, wrkr) -> begin
-        if do_verbose
-            lock(print_lock)
-            try
-                printstyled(name, color = :white)
-                printstyled(
-                    lpad("($wrkr)", name_align - textwidth(name) + 1, " "), " |",
-                    " "^elapsed_align, "started at $(now())\n", color = :white
-                )
-            finally
-                unlock(print_lock)
+    status_lines_visible = Ref(0)
+
+    function clear_status()
+        if status_lines_visible[] > 0
+            for i in 1:status_lines_visible[]-1
+                print(io_ctx.stdout, "\033[1A")  # Move up one line
+                print(io_ctx.stdout, "\033[2K")  # Clear entire line
             end
+            print(io_ctx.stdout, "\r")  # Move to start of line
+            status_lines_visible[] = 0
         end
     end
-    function print_testworker_errored(name, wrkr)
-        lock(print_lock)
-        return try
-            printstyled(name, color = :red)
-            printstyled(
-                lpad("($wrkr)", name_align - textwidth(name) + 1, " "), " |",
-                " "^elapsed_align, " failed at $(now())\n", color = :red
-            )
+
+    function update_status()
+        # only draw the status bar on actual terminals
+        io_ctx.stdout isa Base.TTY || return
+
+        # only draw if we have something to show
+        isempty(running_tests) && return
+        completed = length(results)
+        total = completed + length(tests) + length(running_tests)
+
+        # line 1: empty line
+        line1 = ""
+
+        # line 2: running tests
+        test_list = sort(collect(running_tests), by = x -> x[2][2])
+        status_parts = map(test_list) do (test, (wrkr, _))
+            "$test ($wrkr)"
+        end
+        line2 = "Running:  " * join(status_parts, ", ")
+        ## truncate
+        max_width = displaysize(io_ctx.stdout)[2]
+        if length(line2) > max_width
+            line2 = line2[1:max_width-3] * "..."
+        end
+
+        # line 3: progress + ETA
+        line3 = "Progress: $completed/$total tests completed"
+        if completed > 0
+            # gather stats
+            durations_done = [end_time - start_time for (_, _, start_time, end_time) in results]
+            durations_running = [time() - start_time for (_, start_time) in values(running_tests)]
+            n_done = length(durations_done)
+            n_running = length(durations_running)
+            n_remaining = length(tests)
+            n_total = n_done + n_running + n_remaining
+
+            # estimate per-test time (slightly pessimistic)
+            μ = mean(durations_done)
+            σ = length(durations_done) > 1 ? std(durations_done) : 0.0
+            est_per_test = μ + 0.5σ
+
+            # estimate remaining time
+            est_remaining = sum(durations_running) + n_remaining * est_per_test
+            eta_sec = est_remaining / jobs
+            eta_mins = round(Int, eta_sec / 60)
+            line3 *= " | ETA: ~$eta_mins min"
+        end
+
+        # display
+        clear_status()
+        println(io_ctx.stdout, line1)
+        println(io_ctx.stdout, line2)
+        print(io_ctx.stdout, line3)
+        flush(io_ctx.stdout)
+        status_lines_visible[] = 3
+    end
+
+    # Message types for the printer channel
+    # (:started, test_name, worker_id)
+    # (:finished, test_name, worker_id, record)
+    # (:errored, test_name, worker_id)
+    printer_channel = Channel{Tuple}(100)
+
+    printer_task = @async begin
+        last_status_update = Ref(time())
+        try
+            while isopen(printer_channel)
+                got_message = false
+                while isready(printer_channel)
+                    # Try to get a message from the channel (with timeout)
+                    msg = take!(printer_channel)
+                    got_message = true
+                    msg_type = msg[1]
+
+                    if msg_type == :started
+                        test_name, wrkr = msg[2], msg[3]
+
+                        # Optionally print verbose started message
+                        if do_verbose
+                            clear_status()
+                            print_test_started(RecordType, wrkr, test_name, io_ctx)
+                        end
+
+                    elseif msg_type == :finished
+                        test_name, wrkr, record = msg[2], msg[3], msg[4]
+
+                        clear_status()
+                        print_test_finished(test_name, wrkr, record, io_ctx)
+
+                    elseif msg_type == :errored
+                        test_name, wrkr = msg[2], msg[3]
+
+                        clear_status()
+                        print_test_errorred(RecordType, wrkr, test_name, io_ctx)
+                    end
+                end
+
+                # After a while, display a status line
+                if !done && time() - t0 >= 5 && (got_message || (time() - last_status_update[] >= 1))
+                    update_status()
+                    last_status_update[] = time()
+                end
+                sleep(0.1)
+            end
+        catch ex
+            if isa(ex, InterruptException)
+                # the printer should keep on running,
+                # but we need to signal other tasks to stop
+                stop_work()
+            else
+                rethrow()
+            end
+            isa(ex, InterruptException) || rethrow()
         finally
-            unlock(print_lock)
+            if isempty(tests) && isempty(running_tests)
+                # XXX: only erase the status if we completed successfully.
+                #      in other cases we'll have printed "caught interrupt"
+                clear_status()
+            end
         end
     end
 
-    # construct a testset to render the test results
-    o_ts = Test.DefaultTestSet("Overall")
-    # run tasks
-    results = []
-    all_tasks = Task[]
-    try
-        # Monitor stdin and kill this task on ^C
-        # but don't do this on Windows, because it may deadlock in the kernel
-        t = current_task()
-        running_tests = Dict{String, DateTime}()
-        if !Sys.iswindows() && isa(stdin, Base.TTY)
-            stdin_monitor = @async begin
-                term = REPL.Terminals.TTYTerminal("xterm", stdin, stdout, stderr)
-                try
-                    REPL.Terminals.raw!(term, true)
-                    while true
-                        c = read(term, Char)
-                        if c == '\x3'
-                            Base.throwto(t, InterruptException())
-                            break
-                        elseif c == '?'
-                            println("Currently running: ")
-                            tests = sort(collect(running_tests), by = x -> x[2])
-                            foreach(tests) do (test, date)
-                                println(test, " (running for ", round(now() - date, Minute), ")")
-                            end
-                        end
-                    end
-                catch e
-                    isa(e, InterruptException) || rethrow()
-                finally
-                    REPL.Terminals.raw!(term, false)
+
+    #
+    # execution
+    #
+
+    worker_tasks = Task[]
+    for p in workers()
+        push!(worker_tasks, @async begin
+            while !done
+                # if a worker failed, spawn a new one
+                if p === nothing
+                    p = addworker()
                 end
-            end
-        end
-        @sync begin
-            function recycle_worker(p)
-                rmprocs(p, waitfor = 30)
 
-                return nothing
-            end
+                # get a test to run
+                test, wrkr, test_t0 = Base.@lock test_lock begin
+                    isempty(tests) && break
+                    test = popfirst!(tests)
+                    wrkr = something(test_worker(test), p)
 
-            for p in workers()
-                @async begin
-                    push!(all_tasks, current_task())
-                    while length(tests) > 0
-                        test = popfirst!(tests)
+                    test_t0 = time()
+                    running_tests[test] = (wrkr, test_t0)
 
-                        # if a worker failed, spawn a new one
-                        if p === nothing
-                            p = addworkers(1)[1]
-                        end
-
-                        # some tests may need a special worker
-                        wrkr = something(test_worker(test), p)
-
-                        # run the test
-                        running_tests[test] = now()
-                        resp = try
-                            remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
-                        catch e
-                            isa(e, InterruptException) && return
-                            Any[e]
-                        end
-                        delete!(running_tests, test)
-                        push!(results, (test, resp))
-
-                        # act on the results
-                        if resp isa AbstractTestRecord
-                            print_testworker_stats(test, wrkr, resp::RecordType, io_ctx)
-
-                            if memory_usage(resp) > max_worker_rss
-                                # the worker has reached the max-rss limit, recycle it
-                                # so future tests start with a smaller working set
-                                p = recycle_worker(p)
-                            end
-                        else
-                            @assert resp[1] isa Exception
-                            print_testworker_errored(test, wrkr)
-                            do_quickfail && Base.throwto(t, InterruptException())
-
-                            # the worker encountered some failure, recycle it
-                            # so future tests get a fresh environment
-                            p = recycle_worker(p)
-                        end
-
-                        # get rid of the custom worker
-                        if wrkr != p
-                            recycle_worker(wrkr)
-                        end
-                    end
-
-                    if p !== nothing
-                        recycle_worker(p)
-                    end
+                    test, wrkr, test_t0
                 end
-            end
-        end
-    catch e
-        isa(e, InterruptException) || rethrow()
-        # If the test suite was merely interrupted, still print the
-        # summary, which can be useful to diagnose what's going on
-        foreach(
-            task -> begin
-                istaskstarted(task) || return
-                istaskdone(task) && return
-                try
-                    schedule(task, InterruptException(); error = true)
+
+                # run the test
+                put!(printer_channel, (:started, test, wrkr))
+                result = try
+                    Distributed.remotecall_eval(Main, wrkr, :(import ParallelTestRunner))
+                    remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test,
+                                              init_code, io_ctx.color)
                 catch ex
-                    @error "InterruptException" exception = ex, catch_backtrace()
+                    if isa(ex, InterruptException)
+                        # the worker got interrupted, signal other tasks to stop
+                        stop_work()
+                        break
+                    end
+
+                    # return any other exception as the result
+                    # XXX: also put this in a test record?
+                    ex
                 end
-            end, all_tasks
-        )
-        for t in all_tasks
-            # NOTE: we can't just wait, but need to discard the exception,
-            #       because the throwto for --quickfail also kills the worker.
-            try
-                wait(t)
-            catch e
-                showerror(stderr, e)
+                test_t1 = time()
+                push!(results, (test, result, test_t0, test_t1))
+
+                # act on the results
+                if result isa AbstractTestRecord
+                    put!(printer_channel, (:finished, test, wrkr, result::RecordType))
+
+                    if memory_usage(result) > max_worker_rss
+                        # the worker has reached the max-rss limit, recycle it
+                        # so future tests start with a smaller working set
+                        p = recycle_worker(p)
+                    end
+                else
+                    @assert result isa Exception
+                    put!(printer_channel, (:errored, test, wrkr))
+                    if do_quickfail
+                        stop_work()
+                    end
+
+                    # the worker encountered some failure, recycle it
+                    # so future tests get a fresh environment
+                    p = recycle_worker(p)
+                end
+
+                # get rid of the custom worker
+                if wrkr != p
+                    recycle_worker(wrkr)
+                end
+
+                delete!(running_tests, test)
+            end
+        end)
+    end
+
+
+    #
+    # finalization
+    #
+
+    # monitor worker tasks for failure so that each one doesn't need a try/catch + stop_work()
+    try
+        while true
+            if any(istaskfailed, worker_tasks)
+                println(io_ctx.stderr, "\nCaught an error, stopping...")
+                break
+            elseif done || Base.@lock(test_lock, isempty(tests) && isempty(running_tests))
+                break
+            end
+            sleep(1)
+        end
+    catch err
+        # in case the sleep got interrupted
+        isa(err, InterruptException) || rethrow()
+    finally
+        stop_work()
+    end
+
+    # wait for the printer to finish so that all results have been printed
+    close(printer_channel)
+    wait(printer_task)
+
+    # wait for worker tasks to catch unhandled exceptions
+    for task in worker_tasks
+        try
+            wait(task)
+        catch err
+            # unwrap TaskFailedException
+            while isa(err, TaskFailedException)
+                err = current_exceptions(err.task)[1].exception
+            end
+
+            isa(err, InterruptException) || rethrow()
+        end
+    end
+    @async rmprocs(; waitfor=0)
+
+    # print the output generated by each testset
+    for (testname, result, start, stop) in results
+        if isa(result, AbstractTestRecord) && !isempty(result.output)
+            println(io_ctx.stdout, "\nOutput generated during execution of '$testname':")
+            lines = collect(eachline(IOBuffer(result.output)))
+
+            for (i,line) in enumerate(lines)
+                prefix = if length(lines) == 1
+                    "["
+                elseif i == 1
+                    "┌"
+                elseif i == length(lines)
+                    "└"
+                else
+                    "│"
+                end
+                println(io_ctx.stdout, prefix, " ", line)
             end
         end
-    finally
-        if @isdefined stdin_monitor
-            schedule(stdin_monitor, InterruptException(); error = true)
+    end
+
+    # construct a testset containing all results
+    function create_testset(name; start=nothing, stop=nothing, kwargs...)
+        if start === nothing
+            testset = Test.DefaultTestSet(name; kwargs...)
+        elseif VERSION >= v"1.13.0-DEV.1297"
+            testset = Test.DefaultTestSet(name; time_start=start, kwargs...)
+        elseif VERSION < v"1.13.0-DEV.1037"
+            testset = Test.DefaultTestSet(name; kwargs...)
+            testset.time_start = start
+        else
+            # no way to set time_start retroactively
+            testset = Test.DefaultTestSet(name; kwargs...)
         end
+
+        if stop !== nothing
+            if VERSION < v"1.13.0-DEV.1037"
+                testset.time_end = stop
+            elseif VERSION >= v"1.13.0-DEV.1297"
+                @atomic testset.time_end = stop
+            else
+                # if we can't set the start time, also don't set a stop one
+                # to avoid negative timings
+            end
+        end
+
+        return testset
     end
     t1 = time()
+    o_ts = create_testset("Overall"; start=t0, stop=t1, verbose=do_verbose)
+    function collect_results()
+        with_testset(o_ts) do
+            completed_tests = Set{String}()
+            for (testname, result, start, stop) in results
+                push!(completed_tests, testname)
 
-    if VERSION < v"1.13.0-DEV.1037"
-        o_ts.time_end = t1
+                # decode or fake a testset
+                if isa(result, AbstractTestRecord)
+                    testset = result.test
+                else
+                    testset = create_testset(testname; start, stop)
+                    if isa(result, RemoteException) &&
+                           isa(result.captured.ex, Test.TestSetException)
+                        for i in 1:result.captured.ex.pass
+                            Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, LineNumberNode(@__LINE__, @__FILE__)))
+                        end
+                        for i in 1:result.captured.ex.broken
+                            Test.record(testset, Test.Broken(:test, nothing))
+                        end
+                        for t in result.captured.ex.errors_and_fails
+                            Test.record(testset, t)
+                        end
+                    else
+                        if !isa(result, Exception)
+                            result = ErrorException(string("Unknown result type : ", typeof(result)))
+                        end
+                        # If this test raised an exception that is not a remote testset exception,
+                        # i.e. not a RemoteException capturing a TestSetException that means
+                        # the test runner itself had some problem, so we may have hit a segfault,
+                        # deserialization errors or something similar.  Record this testset as Errored.
+                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
+                    end
+                end
+
+                with_testset(testset) do
+                    Test.record(o_ts, testset)
+                end
+            end
+
+            # mark remaining or running tests as interrupted
+            for test in [tests; collect(keys(running_tests))]
+                (test in completed_tests) && continue
+                testset = create_testset(test)
+                Test.record(testset, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack(NamedTuple[(;exception = "skipped", backtrace = [])]), LineNumberNode(1)))
+                with_testset(testset) do
+                    Test.record(o_ts, testset)
+                end
+            end
+        end
+    end
+    @static if VERSION >= v"1.13.0-DEV.1044"
+        @with Test.TESTSET_PRINT_ENABLE => false begin
+            collect_results()
+        end
     else
-        @atomic o_ts.time_end = t1
-    end
-    with_testset(o_ts) do
-        completed_tests = Set{String}()
-        for (testname, res) in results
-            if res isa AbstractTestRecord
-                resp = res.test
-            else
-                resp = res[1]
-            end
-            push!(completed_tests, testname)
-            if isa(resp, Test.DefaultTestSet)
-                with_testset(resp) do
-                    Test.record(o_ts, resp)
-                end
-            elseif isa(resp, Tuple{Int, Int})
-                fake = Test.DefaultTestSet(testname)
-                for i in 1:resp[1]
-                    Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
-                end
-                for i in 1:resp[2]
-                    Test.record(fake, Test.Broken(:test, nothing))
-                end
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
-            elseif isa(resp, RemoteException) && isa(resp.captured.ex, Test.TestSetException)
-                println("Worker $(resp.pid) failed running test $(testname):")
-                Base.showerror(stdout, resp.captured)
-                println()
-                fake = Test.DefaultTestSet(testname)
-                for i in 1:resp.captured.ex.pass
-                    Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
-                end
-                for i in 1:resp.captured.ex.broken
-                    Test.record(fake, Test.Broken(:test, nothing))
-                end
-                for t in resp.captured.ex.errors_and_fails
-                    Test.record(fake, t)
-                end
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
-            else
-                if !isa(resp, Exception)
-                    resp = ErrorException(string("Unknown result type : ", typeof(resp)))
-                end
-                # If this test raised an exception that is not a remote testset exception,
-                # i.e. not a RemoteException capturing a TestSetException that means
-                # the test runner itself had some problem, so we may have hit a segfault,
-                # deserialization errors or something similar.  Record this testset as Errored.
-                fake = Test.DefaultTestSet(testname)
-                Test.record(fake, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
-                with_testset(fake) do
-                    Test.record(o_ts, fake)
-                end
-            end
-        end
-        for test in tests
-            (test in completed_tests) && continue
-            fake = Test.DefaultTestSet(test)
-            Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
-            with_testset(fake) do
-                Test.record(o_ts, fake)
-            end
+        old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+        Test.TESTSET_PRINT_ENABLE[] = false
+        try
+            collect_results()
+        finally
+            Test.TESTSET_PRINT_ENABLE[] = old_print_setting
         end
     end
-    println()
-    Test.print_test_results(o_ts, 1)
+
+    # display the results
+    println(io_ctx.stdout)
+    if VERSION >= v"1.13.0-DEV.1033"
+        Test.print_test_results(io_ctx.stdout, o_ts, 1)
+    else
+        c = IOCapture.capture() do
+            Test.print_test_results(o_ts, 1)
+        end
+        print(io_ctx.stdout, c.output)
+    end
     if (VERSION >= v"1.13.0-DEV.1037" && !Test.anynonpass(o_ts)) ||
             (VERSION < v"1.13.0-DEV.1037" && !o_ts.anynonpass)
-        println("    \033[32;1mSUCCESS\033[0m")
+        println(io_ctx.stdout, "    \033[32;1mSUCCESS\033[0m")
     else
-        println("    \033[31;1mFAILURE\033[0m\n")
-        Test.print_test_errors(o_ts)
+        println(io_ctx.stderr, "    \033[31;1mFAILURE\033[0m\n")
+        if VERSION >= v"1.13.0-DEV.1033"
+            Test.print_test_errors(io_ctx.stdout, o_ts)
+        else
+            c = IOCapture.capture() do
+                Test.print_test_errors(o_ts)
+            end
+            print(io_ctx.stdout, c.output)
+        end
         throw(Test.FallbackTestSetException("Test run finished with errors"))
     end
-    return nothing
+
+    return
 end # runtests
 
 end # module ParallelTestRunner

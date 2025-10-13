@@ -1,19 +1,25 @@
 using ParallelTestRunner
-using Test, IOCapture
+using Test
+
+cd(@__DIR__)
 
 @testset "ParallelTestRunner" verbose=true begin
 
 @testset "basic test" begin
+    io = IOBuffer()
+    io_color = IOContext(io, :color => true)
+    runtests(["--verbose"]; stdout=io_color, stderr=io_color)
+    str = String(take!(io))
+
     println()
     println("Showing the output of one test run:")
     println("-"^80)
-    c = IOCapture.capture(passthrough=true) do
-        runtests(["--verbose"])
-    end
+    print(str)
     println("-"^80)
     println()
-    @test contains(c.output, r"basic .+ started at")
-    @test contains(c.output, "SUCCESS")
+
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, "SUCCESS")
 end
 
 @testset "custom tests and init code" begin
@@ -31,12 +37,14 @@ end
             @test @should_also_be_defined()
         end
     )
-    c = IOCapture.capture() do
-        runtests(["--verbose"]; init_code, custom_tests)
-    end
-    @test contains(c.output, r"basic .+ started at")
-    @test contains(c.output, r"custom .+ started at")
-    @test contains(c.output, "SUCCESS")
+
+    io = IOBuffer()
+    runtests(["--verbose"]; init_code, custom_tests, stdout=io, stderr=io)
+
+    str = String(take!(io))
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, r"custom .+ started at")
+    @test contains(str, "SUCCESS")
 end
 
 @testset "custom worker" begin
@@ -54,13 +62,15 @@ end
             @test !haskey(ENV, "SPECIAL_ENV_VAR")
         end
     )
-    c = IOCapture.capture() do
-        runtests(["--verbose"]; test_worker, custom_tests)
-    end
-    @test contains(c.output, r"basic .+ started at")
-    @test contains(c.output, r"needs env var .+ started at")
-    @test contains(c.output, r"doesn't need env var .+ started at")
-    @test contains(c.output, "SUCCESS")
+
+    io = IOBuffer()
+    runtests(["--verbose"]; test_worker, custom_tests, stdout=io, stderr=io)
+
+    str = String(take!(io))
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, r"needs env var .+ started at")
+    @test contains(str, r"doesn't need env var .+ started at")
+    @test contains(str, "SUCCESS")
 end
 
 @testset "failing test" begin
@@ -69,15 +79,18 @@ end
             @test 1 == 2
         end
     )
-    c = IOCapture.capture(rethrow=Union{}) do
-        runtests(["--verbose"]; custom_tests)
+
+    io = IOBuffer()
+    @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
+        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
-    @test contains(c.output, r"basic .+ started at")
-    @test contains(c.output, r"failing test .+ failed at")
-    @test contains(c.output, "FAILURE")
-    @test contains(c.output, "1 == 2")
-    @test c.error
-    @test c.value == Test.FallbackTestSetException("Test run finished with errors")
+
+    str = String(take!(io))
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, r"failing test .+ failed at")
+    @test contains(str, "FAILURE")
+    @test contains(str, "Test Failed")
+    @test contains(str, "1 == 2")
 end
 
 @testset "throwing test" begin
@@ -86,15 +99,54 @@ end
             error("This test throws an error")
         end
     )
-    c = IOCapture.capture(rethrow=Union{}) do
-        runtests(["--verbose"]; custom_tests)
+
+    io = IOBuffer()
+    @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
+        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
-    @test contains(c.output, r"basic .+ started at")
-    @test contains(c.output, r"throwing test .+ failed at")
-    @test contains(c.output, "FAILURE")
-    @test contains(c.output, "Got exception outside of a @test")
-    @test c.error
-    @test c.value == Test.FallbackTestSetException("Test run finished with errors")
+
+    str = String(take!(io))
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, r"throwing test .+ failed at")
+    @test contains(str, "FAILURE")
+    @test contains(str, "Error During Test")
+    @test contains(str, "This test throws an error")
+end
+
+@testset "crashing test" begin
+    custom_tests = Dict(
+        "crash" => quote
+            abort() = ccall(:abort, Nothing, ())
+            abort()
+        end
+    )
+
+    io = IOBuffer()
+    @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
+        runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+    end
+
+    str = String(take!(io))
+    @test contains(str, r"crash .+ started at")
+    @test contains(str, "FAILURE")
+    @test contains(str, "Error During Test")
+    @test contains(str, "ProcessExitedException")
+end
+
+@testset "test output" begin
+    custom_tests = Dict(
+        "output" => quote
+            println("This is some output from the test")
+        end
+    )
+
+    io = IOBuffer()
+    runtests(["--verbose"]; custom_tests, stdout=io, stderr=io)
+
+    str = String(take!(io))
+    @test contains(str, r"output .+ started at")
+    @test contains(str, r"This is some output from the test")
+    @test contains(str, "SUCCESS")
 end
 
 end
