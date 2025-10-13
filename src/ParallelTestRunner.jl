@@ -637,7 +637,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     worker_tasks = Task[]
     for p in workers()
         push!(worker_tasks, @async begin
-            while length(tests) > 0 && !done
+            while !done
                 # if a worker failed, spawn a new one
                 if p === nothing
                     p = addworker()
@@ -645,6 +645,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
                 # get a test to run
                 test, wrkr, test_t0 = Base.@lock test_lock begin
+                    isempty(tests) && break
                     test = popfirst!(tests)
                     wrkr = something(test_worker(test), p)
 
@@ -663,7 +664,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                     if isa(ex, InterruptException)
                         # the worker got interrupted, signal other tasks to stop
                         stop_work()
-                        return
+                        break
                     end
 
                     # return any other exception as the result
