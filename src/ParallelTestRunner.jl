@@ -210,24 +210,6 @@ function runtest(::Type{TestRecord}, f, name, init_code)
 
         # process results
         rss = Sys.maxrss()
-        if VERSION >= v"1.11.0-DEV.1529"
-            tc = Test.get_test_counts(data.testset)
-            passes, fails, error, broken, c_passes, c_fails, c_errors, c_broken =
-                tc.passes, tc.fails, tc.errors, tc.broken, tc.cumulative_passes,
-                tc.cumulative_fails, tc.cumulative_errors, tc.cumulative_broken
-        else
-            passes, fails, errors, broken, c_passes, c_fails, c_errors, c_broken =
-                Test.get_test_counts(data.testset)
-        end
-        if !data.testset.anynonpass
-            data = (;
-                result=(passes + c_passes, broken + c_broken),
-                data.output,
-                data.time,
-                data.bytes,
-                data.gctime,
-            )
-        end
         res = TestRecord(data..., rss)
 
         GC.gc(true)
@@ -770,21 +752,34 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     end
 
     # construct a testset to render the test results
-    t1 = time()
-    if VERSION < v"1.13.0-DEV.1037"
-        o_ts = Test.DefaultTestSet("Overall"; verbose=do_verbose)
-        o_ts.time_start = t0
-        o_ts.time_end = t1
-    else
-        o_ts = if v"1.13.0-DEV.1037" <= VERSION < v"1.13.0-DEV.1297"
-            # There's a small range of commits in the v1.13 development series where there's
-            # no way to retroactively set the start time of the testset after it started.
-            Test.DefaultTestSet("Overall"; verbose=do_verbose)
+    function create_testset(name; start=nothing, stop=nothing, kwargs...)
+        if start === nothing
+            testset = Test.DefaultTestSet(name; kwargs...)
+        elseif VERSION >= v"1.13.0-DEV.1297"
+            testset = Test.DefaultTestSet(name; time_start=start, kwargs...)
+        elseif VERSION < v"1.13.0-DEV.1037"
+            testset = Test.DefaultTestSet(name; kwargs...)
+            testset.time_start = start
         else
-            Test.DefaultTestSet("Overall"; verbose=do_verbose, time_start=t0)
+            # no way to set time_start retroactively
+            testset = Test.DefaultTestSet(name; kwargs...)
         end
-        @atomic o_ts.time_end = t1
+
+        if stop !== nothing
+            if VERSION < v"1.13.0-DEV.1037"
+                testset.time_end = stop
+            elseif VERSION >= v"1.13.0-DEV.1297"
+                @atomic testset.time_end = stop
+            else
+                # if we can't set the start time, also don't set a stop one
+                # to avoid negative timings
+            end
+        end
+
+        return testset
     end
+    t1 = time()
+    o_ts = create_testset("Overall"; start=t0, stop=t1, verbose=do_verbose)
     with_testset(o_ts) do
         completed_tests = Set{String}()
         for (testname, res, start, stop) in results
@@ -796,61 +791,44 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             push!(completed_tests, testname)
 
             # decode or fake a testset
-            testset = if isa(resp, Test.DefaultTestSet)
-                resp
-            elseif isa(resp, Tuple{Int, Int})
-                fake = Test.DefaultTestSet(testname)
-                for i in 1:resp[1]
-                    Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
-                end
-                for i in 1:resp[2]
-                    Test.record(fake, Test.Broken(:test, nothing))
-                end
-                fake
-            elseif isa(resp, RemoteException) &&
-                   isa(resp.captured.ex, Test.TestSetException)
-                println(io_ctx.stderr, "Worker $(resp.pid) failed running test $(testname):")
-                Base.showerror(io_ctx.stderr, resp.captured)
-                println(io_ctx.stderr)
-
-                fake = Test.DefaultTestSet(testname)
-                c = IOCapture.capture() do
-                    for i in 1:resp.captured.ex.pass
-                        Test.record(fake, Test.Pass(:test, nothing, nothing, nothing, nothing))
-                    end
-                    for i in 1:resp.captured.ex.broken
-                        Test.record(fake, Test.Broken(:test, nothing))
-                    end
-                    for t in resp.captured.ex.errors_and_fails
-                        Test.record(fake, t)
-                    end
-                end
-                print(io_ctx.stdout, c.output)
-                fake
+            if isa(resp, Test.DefaultTestSet)
+                testset = resp
             else
-                if !isa(resp, Exception)
-                    resp = ErrorException(string("Unknown result type : ", typeof(resp)))
+                testset = create_testset(testname; start, stop)
+                if isa(resp, RemoteException) &&
+                       isa(resp.captured.ex, Test.TestSetException)
+                    println(io_ctx.stderr, "Worker $(resp.pid) failed running test $(testname):")
+                    Base.showerror(io_ctx.stderr, resp.captured)
+                    println(io_ctx.stderr)
+
+                    c = IOCapture.capture() do
+                        for i in 1:resp.captured.ex.pass
+                            Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, nothing))
+                        end
+                        for i in 1:resp.captured.ex.broken
+                            Test.record(testset, Test.Broken(:test, nothing))
+                        end
+                        for t in resp.captured.ex.errors_and_fails
+                            Test.record(testset, t)
+                        end
+                    end
+                    print(io_ctx.stdout, c.output)
+                else
+                    if !isa(resp, Exception)
+                        resp = ErrorException(string("Unknown result type : ", typeof(resp)))
+                    end
+                    # If this test raised an exception that is not a remote testset exception,
+                    # i.e. not a RemoteException capturing a TestSetException that means
+                    # the test runner itself had some problem, so we may have hit a segfault,
+                    # deserialization errors or something similar.  Record this testset as Errored.
+                    c = IOCapture.capture() do
+                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
+                    end
+                    print(io_ctx.stdout, c.output)
                 end
-                # If this test raised an exception that is not a remote testset exception,
-                # i.e. not a RemoteException capturing a TestSetException that means
-                # the test runner itself had some problem, so we may have hit a segfault,
-                # deserialization errors or something similar.  Record this testset as Errored.
-                fake = Test.DefaultTestSet(testname)
-                c = IOCapture.capture() do
-                    Test.record(fake, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack([(exception = resp, backtrace = [])]), LineNumberNode(1)))
-                end
-                print(io_ctx.stdout, c.output)
-                fake
             end
 
             # record the testset
-            if VERSION < v"1.13.0-DEV.1037"
-                testset.time_start = start
-                testset.time_end = stop
-            else
-                #@atomic testset.time_start = start
-                @atomic testset.time_end = stop
-            end
             with_testset(testset) do
                 Test.record(o_ts, testset)
             end
@@ -859,13 +837,13 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         # mark remaining or running tests as interrupted
         for test in [tests; collect(keys(running_tests))]
             (test in completed_tests) && continue
-            fake = Test.DefaultTestSet(test)
+            testset = create_testset(test)
             c = IOCapture.capture() do
-                Test.record(fake, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
+                Test.record(testset, Test.Error(:test_interrupted, test, nothing, Base.ExceptionStack([(exception = "skipped", backtrace = [])]), LineNumberNode(1)))
             end
             # don't print the output of interrupted tests, it's not useful
-            with_testset(fake) do
-                Test.record(o_ts, fake)
+            with_testset(testset) do
+                Test.record(o_ts, testset)
             end
         end
     end
