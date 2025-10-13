@@ -86,6 +86,7 @@ end
 struct TestIOContext
     stdout::IO
     stderr::IO
+    color::Bool
     lock::ReentrantLock
     name_align::Int
     elapsed_align::Int
@@ -102,8 +103,10 @@ function test_IOContext(::Type{TestRecord}, stdout::IO, stderr::IO, lock::Reentr
     alloc_align = textwidth("Alloc (MB)")
     rss_align = textwidth("RSS (MB)")
 
+    color = get(stdout, :color, false)
+
     return TestIOContext(
-        stdout, stderr, lock, name_align, elapsed_align, gc_align, percent_align,
+        stdout, stderr, color, lock, name_align, elapsed_align, gc_align, percent_align,
         alloc_align, rss_align
     )
 end
@@ -181,7 +184,7 @@ end
 # entry point
 #
 
-function runtest(::Type{TestRecord}, f, name, init_code)
+function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
@@ -195,7 +198,7 @@ function runtest(::Type{TestRecord}, f, name, init_code)
             GC.gc(true)
             Random.seed!(1)
 
-            stats = @timed IOCapture.capture() do
+            stats = @timed IOCapture.capture(; color=$color) do
                 @testset $name begin
                     $f
                 end
@@ -654,7 +657,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # run the test
                 put!(printer_channel, (:started, test, wrkr))
                 result = try
-                    remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test, init_code)
+                    remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test,
+                                              init_code, io_ctx.color)
                 catch ex
                     if isa(ex, InterruptException)
                         # the worker got interrupted, signal other tasks to stop
