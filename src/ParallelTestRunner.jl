@@ -578,7 +578,6 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         ]
     )
 
-    elapsed_align = textwidth("Time (s)")
     print_lock = stdout isa Base.LibuvStream ? stdout.lock : ReentrantLock()
     if stderr isa Base.LibuvStream
         stderr.lock = print_lock
