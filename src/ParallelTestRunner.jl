@@ -125,11 +125,10 @@ end
 function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
-        printstyled(ctx.stdout, test, color = :white)
+        printstyled(ctx.stdout, test, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |", color = :white)
         printstyled(
             ctx.stdout,
-            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
-            " "^ctx.elapsed_align, "started at $(now())\n", color = :white
+            " "^ctx.elapsed_align, "started at $(now())\n", color = :light_black
         )
         flush(ctx.stdout)
     finally

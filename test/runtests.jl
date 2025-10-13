@@ -7,7 +7,8 @@ cd(@__DIR__)
 
 @testset "basic test" begin
     io = IOBuffer()
-    runtests(["--verbose"]; stdout=io, stderr=io)
+    io_color = IOContext(io, :color => true)
+    runtests(["--verbose"]; stdout=io_color, stderr=io_color)
     str = String(take!(io))
 
     println()
