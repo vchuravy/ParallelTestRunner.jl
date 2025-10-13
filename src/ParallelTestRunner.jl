@@ -771,12 +771,18 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
 
     # construct a testset to render the test results
     t1 = time()
-    o_ts = Test.DefaultTestSet("Overall"; verbose=do_verbose)
     if VERSION < v"1.13.0-DEV.1037"
+        o_ts = Test.DefaultTestSet("Overall"; verbose=do_verbose)
         o_ts.time_start = t0
         o_ts.time_end = t1
     else
-        #@atomic o_ts.time_start = t0
+        o_ts = if v"1.13.0-DEV.1037" <= VERSION < v"1.13.0-DEV.1297"
+            # There's a small range of commits in the v1.13 development series where there's
+            # no way to retroactively set the start time of the testset after it started.
+            Test.DefaultTestSet("Overall"; verbose=do_verbose)
+        else
+            Test.DefaultTestSet("Overall"; verbose=do_verbose, time_start=t0)
+        end
         @atomic o_ts.time_end = t1
     end
     with_testset(o_ts) do
