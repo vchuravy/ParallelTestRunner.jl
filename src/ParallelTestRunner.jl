@@ -231,6 +231,58 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
     end
 end
 
+@static if Sys.isapple()
+
+mutable struct VmStatistics64
+	free_count::UInt32
+	active_count::UInt32
+	inactive_count::UInt32
+	wire_count::UInt32
+	zero_fill_count::UInt64
+	reactivations::UInt64
+	pageins::UInt64
+	pageouts::UInt64
+	faults::UInt64
+	cow_faults::UInt64
+	lookups::UInt64
+	hits::UInt64
+	purges::UInt64
+	purgeable_count::UInt32
+
+	speculative_count::UInt32
+
+	decompressions::UInt64
+	compressions::UInt64
+	swapins::UInt64
+	swapouts::UInt64
+	compressor_page_count::UInt32
+	throttled_count::UInt32
+	external_page_count::UInt32
+	internal_page_count::UInt32
+	total_uncompressed_pages_in_compressor::UInt64
+
+	VmStatistics64() = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+end
+
+
+function available_memory()
+	vms = Ref{VmStatistics64}(VmStatistics64())
+	mach_host_self = @ccall mach_host_self()::UInt32
+	count = UInt32(sizeof(VmStatistics64) ÷ sizeof(Int32))
+	ref_count = Ref(count)
+	@ccall host_statistics64(mach_host_self::UInt32, 4::Int64, pointer_from_objref(vms[])::Ptr{Int64}, ref_count::Ref{UInt32})::Int64
+
+	page_size = Int(@ccall sysconf(29::UInt32)::UInt32)
+
+	return (Int(vms[].free_count) + Int(vms[].inactive_count)) * page_size
+end
+
+else
+
+available_memory() = Sys.free_memory()
+
+end
+
 # This is an internal function, not to be used by end users.  The keyword
 # arguments are only for testing purposes.
 """
@@ -238,7 +290,7 @@ end
 
 Determine default number of parallel jobs.
 """
-function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_memory())
+function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = available_memory())
     jobs = cpu_threads
     memory_jobs = Int64(free_memory) ÷ (2 * 2^30)
     return max(1, min(jobs, memory_jobs))
