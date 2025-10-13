@@ -7,6 +7,8 @@ using Dates
 using Printf: @sprintf
 using Base.Filesystem: path_separator
 using Statistics
+using Scratch
+using Serialization
 import Test
 import Random
 import IOCapture
@@ -187,8 +189,7 @@ end
 function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
-        mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
-        mod = @eval(Main, module $mod_name end)
+        mod = @eval(Main, module $(gensym(name)) end)
         @eval(mod, import ParallelTestRunner: Test, Random, IOCapture)
         @eval(mod, using .Test, .Random)
 
@@ -243,6 +244,33 @@ function default_njobs(; cpu_threads = Sys.CPU_THREADS, free_memory = Sys.free_m
     return max(1, min(jobs, memory_jobs))
 end
 
+# Historical test duration database
+function get_history_file(mod::Module)
+    scratch_dir = @get_scratch!("durations")
+    return joinpath(scratch_dir, "v$(VERSION.major).$(VERSION.minor)", "$(nameof(mod)).jls")
+end
+function load_test_history(mod::Module)
+    history_file = get_history_file(mod)
+    if isfile(history_file)
+        try
+            return deserialize(history_file)
+        catch e
+            @warn "Failed to load test history from $history_file" exception=e
+            return Dict{String, Float64}()
+        end
+    else
+        return Dict{String, Float64}()
+    end
+end
+function save_test_history(mod::Module, history::Dict{String, Float64})
+    history_file = get_history_file(mod)
+    try
+        serialize(history_file, history)
+    catch e
+        @warn "Failed to save test history to $history_file" exception=e
+    end
+end
+
 function test_exe()
     test_exeflags = Base.julia_cmd()
     filter!(test_exeflags.exec) do c
@@ -278,14 +306,15 @@ function recycle_worker(p)
 end
 
 """
-    runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
+    runtests(mod::Module, ARGS; testfilter = Returns(true), RecordType = TestRecord, custom_tests = Dict())
 
 Run Julia tests in parallel across multiple worker processes.
 
 ## Arguments
 
-The primary argument is a command line arguments array, typically from `Base.ARGS`. When you
-run the tests with `Pkg.test`, this can be changed with the `test_args` keyword argument.
+- `mod`: The module calling runtests
+- `ARGS`: Command line arguments array, typically from `Base.ARGS`. When you run the tests
+  with `Pkg.test`, this can be changed with the `test_args` keyword argument.
 
 Several keyword arguments are also supported:
 
@@ -321,16 +350,16 @@ Several keyword arguments are also supported:
 
 ```julia
 # Run all tests with default settings
-runtests(ARGS)
+runtests(MyModule, ARGS)
 
 # Run only tests matching "integration"
-runtests(["integration"])
+runtests(MyModule, ["integration"])
 
 # Run with custom filter function
-runtests(ARGS, test -> occursin("unit", test))
+runtests(MyModule, ARGS; testfilter = test -> occursin("unit", test))
 
 # Use custom test record type
-runtests(ARGS, Returns(true), MyCustomTestRecord)
+runtests(MyModule, ARGS; RecordType = MyCustomTestRecord)
 ```
 
 ## Memory Management
@@ -338,7 +367,7 @@ runtests(ARGS, Returns(true), MyCustomTestRecord)
 Workers are automatically recycled when they exceed memory limits to prevent out-of-memory
 issues during long test runs. The memory limit is set based on system architecture.
 """
-function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
+function runtests(mod::Module, ARGS; testfilter = Returns(true), RecordType = TestRecord,
                   custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
                   test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
     #
@@ -417,6 +446,8 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     ## finalize
     unique!(tests)
     Random.shuffle!(tests)
+    historical_durations = load_test_history(mod)
+    sort!(tests, by = x -> -get(historical_durations, x, Inf))
 
     # list tests, if requested
     if do_list
@@ -503,9 +534,6 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     end
 
     function update_status()
-        # only draw the status bar on actual terminals
-        io_ctx.stdout isa Base.TTY || return
-
         # only draw if we have something to show
         isempty(running_tests) && return
         completed = length(results)
@@ -529,33 +557,39 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         # line 3: progress + ETA
         line3 = "Progress: $completed/$total tests completed"
         if completed > 0
-            # gather stats
-            durations_done = [end_time - start_time for (_, _, start_time, end_time) in results]
-            durations_running = [time() - start_time for (_, start_time) in values(running_tests)]
-            n_done = length(durations_done)
-            n_running = length(durations_running)
-            n_remaining = length(tests)
-            n_total = n_done + n_running + n_remaining
-
             # estimate per-test time (slightly pessimistic)
+            durations_done = [end_time - start_time for (_, _, start_time, end_time) in results]
             μ = mean(durations_done)
             σ = length(durations_done) > 1 ? std(durations_done) : 0.0
             est_per_test = μ + 0.5σ
 
-            # estimate remaining time
-            est_remaining = sum(durations_running) + n_remaining * est_per_test
+            est_remaining = 0.0
+            ## currently-running
+            for (test, (_, start_time)) in running_tests
+                elapsed = time() - start_time
+                duration = get(historical_durations, test, est_per_test)
+                est_remaining += max(0.0, duration - elapsed)
+            end
+            ## yet-to-run
+            for test in tests
+                est_remaining += get(historical_durations, test, est_per_test)
+            end
+
             eta_sec = est_remaining / jobs
             eta_mins = round(Int, eta_sec / 60)
             line3 *= " | ETA: ~$eta_mins min"
         end
 
-        # display
-        clear_status()
-        println(io_ctx.stdout, line1)
-        println(io_ctx.stdout, line2)
-        print(io_ctx.stdout, line3)
-        flush(io_ctx.stdout)
-        status_lines_visible[] = 3
+        # only display the status bar on actual terminals
+        # (but make sure we cover this code in CI)
+        if io_ctx.stdout isa Base.TTY
+            clear_status()
+            println(io_ctx.stdout, line1)
+            println(io_ctx.stdout, line2)
+            print(io_ctx.stdout, line3)
+            flush(io_ctx.stdout)
+            status_lines_visible[] = 3
+        end
     end
 
     # Message types for the printer channel
@@ -763,7 +797,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
         end
     end
 
-    # construct a testset containing all results
+    # process test results and convert into a testset
     function create_testset(name; start=nothing, stop=nothing, kwargs...)
         if start === nothing
             testset = Test.DefaultTestSet(name; kwargs...)
@@ -801,6 +835,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
                 # decode or fake a testset
                 if isa(result, AbstractTestRecord)
                     testset = result.test
+                    historical_durations[testname] = stop - start
                 else
                     testset = create_testset(testname; start, stop)
                     if isa(result, RemoteException) &&
@@ -855,6 +890,7 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
             Test.TESTSET_PRINT_ENABLE[] = old_print_setting
         end
     end
+    save_test_history(mod, historical_durations)
 
     # display the results
     println(io_ctx.stdout)
