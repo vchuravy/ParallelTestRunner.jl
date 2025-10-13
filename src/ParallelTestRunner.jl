@@ -592,8 +592,6 @@ function runtests(ARGS; testfilter = Returns(true), RecordType = TestRecord,
     printer_task = @async begin
         last_status_update = Ref(time())
         try
-            # XXX: it's possible this task doesn't run, not processing results,
-            #      while the execution runners have exited...
             while isopen(printer_channel)
                 got_message = false
                 while isready(printer_channel)
