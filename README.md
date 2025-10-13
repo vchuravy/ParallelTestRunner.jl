@@ -28,6 +28,7 @@ First you should remove all `include` statements that you added.
 Then in your `test/runtests.jl` add:
 
 ```julia
+using MyModule
 using ParallelTestRunner
 
 runtests(MyModule, ARGS)
@@ -38,14 +39,14 @@ runtests(MyModule, ARGS)
 `runtests` takes a keyword argument that acts as a filter function
 
 ```julia
-function testfilter(test)
+function test_filter(test)
     if Sys.iswindows() && test == "ext/specialfunctions"
         return false
     end
     return true
 end
 
-runtests(MyModule, ARGS; testfilter)
+runtests(MyModule, ARGS; test_filter)
 ```
 
 ### Provide defaults
