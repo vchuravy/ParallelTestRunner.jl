@@ -198,7 +198,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod = @eval(Main, module $(gensym(name)) end)
-        @eval(mod, import ParallelTestRunner: Test, Random, IOCapture)
+        @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
 
         Core.eval(mod, init_code)
@@ -207,13 +207,17 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
             GC.gc(true)
             Random.seed!(1)
 
-            stats = @timed IOCapture.capture(; color=$color) do
-                @testset $name begin
-                    $f
+            mktemp() do path, io
+                stats = redirect_stdio(stdout=io, stderr=io) do
+                    @timed @testset $name begin
+                        $f
+                    end
                 end
+                close(io)
+                output = read(path, String)
+                (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
+
             end
-            captured = stats.value
-            (; testset=captured.value, captured.output, stats.time, stats.bytes, stats.gctime)
         end
 
         # process results
