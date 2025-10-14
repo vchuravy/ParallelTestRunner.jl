@@ -578,7 +578,6 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         ]
     )
 
-    elapsed_align = textwidth("Time (s)")
     print_lock = stdout isa Base.LibuvStream ? stdout.lock : ReentrantLock()
     if stderr isa Base.LibuvStream
         stderr.lock = print_lock
@@ -592,8 +591,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     function clear_status()
         if status_lines_visible[] > 0
             for i in 1:status_lines_visible[]-1
-                print(io_ctx.stdout, "\033[1A")  # Move up one line
                 print(io_ctx.stdout, "\033[2K")  # Clear entire line
+                print(io_ctx.stdout, "\033[1A")  # Move up one line
             end
             print(io_ctx.stdout, "\r")  # Move to start of line
             status_lines_visible[] = 0
