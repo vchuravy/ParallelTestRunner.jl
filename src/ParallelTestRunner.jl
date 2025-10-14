@@ -661,7 +661,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     # Message types for the printer channel
     # (:started, test_name, worker_id)
     # (:finished, test_name, worker_id, record)
-    # (:errored, test_name, worker_id)
+    # (:errored, test_name, worker_id, test_time)
     printer_channel = Channel{Tuple}(100)
 
     printer_task = @async begin
