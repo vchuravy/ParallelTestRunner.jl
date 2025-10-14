@@ -141,7 +141,7 @@ function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     end
 end
 
-function print_test_finished(test, wrkr, record::TestRecord, ctx::TestIOContext)
+function print_test_finished(record::TestRecord, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stdout, test, color = :white)
@@ -688,7 +688,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        print_test_finished(test_name, wrkr, record, io_ctx)
+                        print_test_finished(record, wrkr, test_name, io_ctx)
 
                     elseif msg_type == :errored
                         test_name, wrkr, test_time = msg[2], msg[3], msg[4]
