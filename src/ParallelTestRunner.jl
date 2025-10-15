@@ -998,7 +998,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     if VERSION >= v"1.13.0-DEV.1033"
         Test.print_test_results(io_ctx.stdout, o_ts, 1)
     else
-        c = IOCapture.capture() do
+        c = IOCapture.capture(; io_ctx.color) do
             Test.print_test_results(o_ts, 1)
         end
         print(io_ctx.stdout, c.output)
@@ -1011,7 +1011,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         if VERSION >= v"1.13.0-DEV.1033"
             Test.print_test_errors(io_ctx.stdout, o_ts)
         else
-            c = IOCapture.capture() do
+            c = IOCapture.capture(; io_ctx.color) do
                 Test.print_test_errors(o_ts)
             end
             print(io_ctx.stdout, c.output)
