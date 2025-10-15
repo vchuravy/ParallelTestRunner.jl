@@ -121,13 +121,15 @@ end
 
 @testset "crashing test" begin
     custom_tests = Dict(
-        "crash" => quote
+        "abort" => quote
             abort() = ccall(:abort, Nothing, ())
             abort()
         end
     )
 
-    println("NOTE: The next test is expected to crash a worker process, which may print some output to the terminal.")
+    print("""NOTE: The next test is expected to crash a worker process,
+                   which may print some output to the terminal.
+             """)
     io = IOBuffer()
     @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
         runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
@@ -135,7 +137,8 @@ end
     println()
 
     str = String(take!(io))
-    @test contains(str, r"crash .+ started at")
+    @test contains(str, r"abort .+ started at")
+    @test contains(str, r"abort .+ crashed at")
     @test contains(str, "FAILURE")
     @test contains(str, "Error During Test")
     @test contains(str, "ProcessExitedException")

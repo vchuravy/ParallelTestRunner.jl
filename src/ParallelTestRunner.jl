@@ -68,8 +68,10 @@ end
 abstract type AbstractTestRecord end
 
 struct TestRecord <: AbstractTestRecord
-    test::Any
-    output::String
+    value::Any          # AbstractTestSet or TestSetException
+    output::String      # captured stdout/stderr
+
+    # stats
     time::Float64
     bytes::UInt64
     gctime::Float64
@@ -165,7 +167,7 @@ function print_test_finished(record::TestRecord, wrkr, test, ctx::TestIOContext)
     end
 end
 
-function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext, test_time)
+function print_test_failed(record::TestRecord, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stderr, test, color = :red)
@@ -174,7 +176,7 @@ function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext,
             lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |"
             , color = :red
         )
-        time_str = @sprintf("%7.2f", test_time)
+        time_str = @sprintf("%7.2f", record.time)
         printstyled(ctx.stderr, lpad(time_str, ctx.elapsed_align + 1, " "), " │", color = :red)
 
         failed_str = "failed at $(now())\n"
@@ -182,6 +184,24 @@ function print_test_errorred(::Type{TestRecord}, wrkr, test, ctx::TestIOContext,
         fail_align = (11 + ctx.gc_align + ctx.percent_align + ctx.alloc_align + ctx.rss_align - textwidth(failed_str)) ÷ 2 + textwidth(failed_str)
         failed_str = lpad(failed_str, fail_align, " ")
         printstyled(ctx.stderr, failed_str, color = :red)
+
+        # TODO: print other stats?
+
+        flush(ctx.stderr)
+    finally
+        unlock(ctx.lock)
+    end
+end
+
+function print_test_crashed(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+    lock(ctx.lock)
+    try
+        printstyled(ctx.stderr, test, color = :red)
+        printstyled(
+            ctx.stderr,
+            lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " |",
+            " "^ctx.elapsed_align, " crashed at $(now())\n", color = :red
+        )
 
         flush(ctx.stderr)
     finally
@@ -209,8 +229,15 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
 
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
-                    @timed @testset $name begin
-                        $f
+                    @timed try
+                        @testset $name begin
+                            $f
+                        end
+                    catch err
+                        isa(err, Test.TestSetException) || rethrow()
+
+                        # return the error to package it into a TestRecord
+                        err
                     end
                 end
                 close(io)
@@ -665,13 +692,13 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     # Message types for the printer channel
     # (:started, test_name, worker_id)
     # (:finished, test_name, worker_id, record)
-    # (:errored, test_name, worker_id, test_time)
+    # (:crashed, test_name, worker_id, test_time)
     printer_channel = Channel{Tuple}(100)
 
     printer_task = @async begin
         last_status_update = Ref(time())
         try
-            while isopen(printer_channel)
+            while isopen(printer_channel) || isready(printer_channel)
                 got_message = false
                 while isready(printer_channel)
                     # Try to get a message from the channel (with timeout)
@@ -692,13 +719,17 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        print_test_finished(record, wrkr, test_name, io_ctx)
+                        if record.value isa Exception
+                            print_test_failed(record, wrkr, test_name, io_ctx)
+                        else
+                            print_test_finished(record, wrkr, test_name, io_ctx)
+                        end
 
-                    elseif msg_type == :errored
-                        test_name, wrkr, test_time = msg[2], msg[3], msg[4]
+                    elseif msg_type == :crashed
+                        test_name, wrkr = msg[2], msg[3]
 
                         clear_status()
-                        print_test_errorred(RecordType, wrkr, test_name, io_ctx, test_time)
+                        print_test_crashed(RecordType, wrkr, test_name, io_ctx)
                     end
                 end
 
@@ -707,7 +738,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     update_status()
                     last_status_update[] = time()
                 end
-                sleep(0.1)
+
+                isopen(printer_channel) && sleep(0.1)
             end
         catch ex
             if isa(ex, InterruptException)
@@ -766,8 +798,6 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         break
                     end
 
-                    # return any other exception as the result
-                    # XXX: also put this in a test record?
                     ex
                 end
                 test_t1 = time()
@@ -775,7 +805,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
 
                 # act on the results
                 if result isa AbstractTestRecord
-                    put!(printer_channel, (:finished, test, wrkr, result::RecordType))
+                    @assert result isa RecordType
+                    put!(printer_channel, (:finished, test, wrkr, result))
 
                     if memory_usage(result) > max_worker_rss
                         # the worker has reached the max-rss limit, recycle it
@@ -784,13 +815,12 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     end
                 else
                     @assert result isa Exception
-                    put!(printer_channel, (:errored, test, wrkr, test_t1-test_t0))
+                    put!(printer_channel, (:crashed, test, wrkr))
                     if do_quickfail
                         stop_work()
                     end
 
-                    # the worker encountered some failure, recycle it
-                    # so future tests get a fresh environment
+                    # the worker encountered some serious failure, recycle it
                     p = recycle_worker(p)
                 end
 
@@ -903,32 +933,33 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                 push!(completed_tests, testname)
 
                 # decode or fake a testset
-                if isa(result, AbstractTestRecord)
-                    testset = result.test
-                    historical_durations[testname] = stop - start
-                else
-                    testset = create_testset(testname; start, stop)
-                    if isa(result, RemoteException) &&
-                           isa(result.captured.ex, Test.TestSetException)
-                        for i in 1:result.captured.ex.pass
+                if result isa AbstractTestRecord
+                    if result.value isa Test.AbstractTestSet
+                        testset = result.value
+                        historical_durations[testname] = stop - start
+                    else
+                        # TODO: improve the Test stdlib to keep track of the exact failure
+                        #       instead of flattening into an exception without provenance
+                        @assert result.value isa Test.TestSetException
+                        testset = create_testset(testname; start, stop)
+                        for i in 1:result.value.pass
                             Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, LineNumberNode(@__LINE__, @__FILE__)))
                         end
-                        for i in 1:result.captured.ex.broken
+                        for i in 1:result.value.broken
                             Test.record(testset, Test.Broken(:test, nothing))
                         end
-                        for t in result.captured.ex.errors_and_fails
+                        for t in result.value.errors_and_fails
                             Test.record(testset, t)
                         end
-                    else
-                        if !isa(result, Exception)
-                            result = ErrorException(string("Unknown result type : ", typeof(result)))
-                        end
-                        # If this test raised an exception that is not a remote testset exception,
-                        # i.e. not a RemoteException capturing a TestSetException that means
-                        # the test runner itself had some problem, so we may have hit a segfault,
-                        # deserialization errors or something similar.  Record this testset as Errored.
-                        Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
                     end
+                else
+                    # If this test raised an exception that is not a remote testset
+                    # exception, that means the test runner itself had some problem, so we
+                    # may have hit a segfault, deserialization errors or something similar.
+                    # Record this testset as Errored.
+                    @assert result isa Exception
+                    testset = create_testset(testname; start, stop)
+                    Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
                 end
 
                 with_testset(testset) do
