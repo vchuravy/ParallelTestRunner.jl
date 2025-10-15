@@ -77,6 +77,7 @@ end
 
 @testset "custom testrecord" begin
     custom_record_init = quote
+        import ParallelTestRunner: Test
         struct CustomTestRecord <: ParallelTestRunner.AbstractTestRecord
             # TODO: Would it be better to wrap "ParallelTestRunner.TestRecord "
             value::Any          # AbstractTestSet or TestSetException
@@ -91,13 +92,13 @@ end
         function ParallelTestRunner.memory_usage(rec::CustomTestRecord)
             return rec.rss
         end
-        function ParallelTestRunner.test_IOContext(::Type{CustomTestRecord}, args...)
-            return ParallelTestRunner.test_IOContext(ParallelTestRunner.TestRecord, args...)
+        function ParallelTestRunner.test_IOContext(::Type{CustomTestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int64)
+            return ParallelTestRunner.test_IOContext(ParallelTestRunner.TestRecord, stdout, stderr, lock, name_align)
         end
         function ParallelTestRunner.runtest(::Type{CustomTestRecord}, f, name, init_code, color, (; say_hello))
             function inner()
                 # generate a temporary module to execute the tests in
-                mod = @eval(Main, module $(gensym(name)) end)
+                mod = Core.eval(Main, Expr(:module, true,  gensym(name), Expr(:block)))
                 @eval(mod, import ParallelTestRunner: Test, Random)
                 @eval(mod, using .Test, .Random)
 
@@ -110,11 +111,12 @@ end
                     mktemp() do path, io
                         stats = redirect_stdio(stdout=io, stderr=io) do
                             @timed try
-                                if say_hello
-                                    println("Hello from test '$name'")
+                                # Since we are in a double quote we need to use this form to escape `$`
+                                if $(Expr(:$, :say_hello))
+                                    println("Hello from test '" * $(Expr(:$, :name)) * "'")
                                 end
-                                @testset $name begin
-                                    $f
+                                @testset $(Expr(:$, :name)) begin
+                                    $(Expr(:$, :f))
                                 end
                             catch err
                                 isa(err, Test.TestSetException) || rethrow()
@@ -132,7 +134,7 @@ end
 
                 # process results
                 rss = Sys.maxrss()
-                record = TestRecord(data..., rss)
+                record = CustomTestRecord(data..., rss)
 
                 GC.gc(true)
                 return record
