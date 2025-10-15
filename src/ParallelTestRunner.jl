@@ -698,7 +698,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     printer_task = @async begin
         last_status_update = Ref(time())
         try
-            while isopen(printer_channel)
+            while isopen(printer_channel) || isready(printer_channel)
                 got_message = false
                 while isready(printer_channel)
                     # Try to get a message from the channel (with timeout)
