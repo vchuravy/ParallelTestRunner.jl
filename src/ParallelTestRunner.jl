@@ -412,7 +412,7 @@ Run Julia tests in parallel across multiple worker processes.
 
 - `mod`: The module calling runtests
 - `ARGS`: Command line arguments array, typically from `Base.ARGS`. When you run the tests
-  with `Pkg.value`, this can be changed with the `test_args` keyword argument.
+  with `Pkg.test`, this can be changed with the `test_args` keyword argument.
 
 Several keyword arguments are also supported:
 
