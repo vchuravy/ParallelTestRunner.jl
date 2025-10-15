@@ -1,7 +1,7 @@
 module ParallelTestRunner
 
 export runtests, addworkers, addworker
-public extract_flag!
+# public extract_flag!
 
 using Distributed
 using Dates
