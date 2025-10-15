@@ -738,7 +738,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     update_status()
                     last_status_update[] = time()
                 end
-                sleep(0.1)
+
+                isopen(printer_channel) && sleep(0.1)
             end
         catch ex
             if isa(ex, InterruptException)
