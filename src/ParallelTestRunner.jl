@@ -2,7 +2,7 @@ module ParallelTestRunner
 
 export runtests, addworkers, addworker
 
-using Distributed
+using Malt
 using Dates
 using Printf: @sprintf
 using Base.Filesystem: path_separator
@@ -375,24 +375,37 @@ function test_exe()
     return test_exeflags
 end
 
+# Map PIDs to logical worker IDs
+# Malt doesn't have a global worker ID, and PID make printing ugly
+const WORKER_IDS = Dict{Int32, Int32}()
+
+worker_id(wrkr) = WORKER_IDS[wrkr.proc_pid]
+
 """
     addworkers(X; kwargs...)
 
-Add `X` worker processes, with additional keyword arguments passed to `Distributed.addprocs`.
+Add `X` worker processes.
 """
-function addworkers(X; kwargs...)
+function addworkers(X; env=Vector{Pair{String, String}}())
     exe = test_exe()
-    exename = exe[1]
     exeflags = exe[2:end]
 
-    return withenv("JULIA_NUM_THREADS" => 1, "OPENBLAS_NUM_THREADS" => 1) do
-        addprocs(X; exename, exeflags, kwargs...)
+    push!(env, "JULIA_NUM_THREADS" => "1")
+    # Malt already sets OPENBLAS_NUM_THREADS to 1
+    push!(env, "OPENBLAS_NUM_THREADS" => "1")
+
+    workers = Malt.Worker[]
+    for _ in 1:X
+        wrkr = Malt.Worker(;exeflags, env)
+        WORKER_IDS[wrkr.proc_pid] = length(WORKER_IDS) + 1
+        push!(workers, wrkr)
     end
+    return workers
 end
 addworker(; kwargs...) = addworkers(1; kwargs...)[1]
 
-function recycle_worker(p)
-    rmprocs(p, waitfor = 30)
+function recycle_worker(w::Malt.Worker)
+    Malt.stop(w; exit_timeout = 15.0, term_timeout = 15.0)
 
     return nothing
 end
@@ -572,7 +585,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     end
     jobs = clamp(jobs, 1, length(tests))
     println(stdout, "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable.")
-    addworkers(min(jobs, length(tests)))
+    workers = addworkers(min(jobs, length(tests)))
+    nworkers = length(workers)
 
     t0 = time()
     results = []
@@ -604,7 +618,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
             textwidth(testgroupheader) + textwidth(" ") +
                 textwidth(workerheader); map(
                 x -> textwidth(x) +
-                    3 + ndigits(nworkers()), tests
+                    3 + ndigits(nworkers), tests
             )
         ]
     )
@@ -765,7 +779,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     #
 
     worker_tasks = Task[]
-    for p in workers()
+    for p in workers
         push!(worker_tasks, @async begin
             while !done
                 # if a worker failed, spawn a new one
@@ -780,16 +794,16 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     wrkr = something(test_worker(test), p)
 
                     test_t0 = time()
-                    running_tests[test] = (wrkr, test_t0)
+                    running_tests[test] = (worker_id(wrkr), test_t0)
 
                     test, wrkr, test_t0
                 end
 
                 # run the test
-                put!(printer_channel, (:started, test, wrkr))
+                put!(printer_channel, (:started, test, worker_id(wrkr)))
                 result = try
-                    Distributed.remotecall_eval(Main, wrkr, :(import ParallelTestRunner))
-                    remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test,
+                    Malt.remote_eval_wait(Main, wrkr, :(import ParallelTestRunner))
+                    Malt.remote_call_fetch(invokelatest, wrkr, runtest, RecordType, test_runners[test], test,
                                               init_code, io_ctx.color)
                 catch ex
                     if isa(ex, InterruptException)
@@ -806,7 +820,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                 # act on the results
                 if result isa AbstractTestRecord
                     @assert result isa RecordType
-                    put!(printer_channel, (:finished, test, wrkr, result))
+                    put!(printer_channel, (:finished, test, worker_id(wrkr), result))
 
                     if memory_usage(result) > max_worker_rss
                         # the worker has reached the max-rss limit, recycle it
@@ -815,7 +829,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     end
                 else
                     @assert result isa Exception
-                    put!(printer_channel, (:crashed, test, wrkr))
+                    put!(printer_channel, (:crashed, test, worker_id(wrkr)))
                     if do_quickfail
                         stop_work()
                     end

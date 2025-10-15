@@ -141,7 +141,7 @@ end
     @test contains(str, r"abort .+ crashed at")
     @test contains(str, "FAILURE")
     @test contains(str, "Error During Test")
-    @test contains(str, "ProcessExitedException")
+    @test contains(str, "Malt.TerminatedWorkerException")
 end
 
 @testset "test output" begin
