@@ -286,7 +286,7 @@ function available_memory()
 
 	page_size = Int(@ccall sysconf(29::UInt32)::UInt32)
 
-	return (Int(vms[].free_count) + Int(vms[].inactive_count)) * page_size
+	return (Int(vms[].free_count) + Int(vms[].inactive_count) + Int(vms[].purgeable_count)) * page_size
 end
 
 else
