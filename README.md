@@ -4,18 +4,24 @@ Simple parallel test runner for Julia tests with autodiscovery.
 
 ## Usage
 
+The main entry point of `ParallelTestRunner` is the exported function `runtests`, which takes two mandatory arguments:
+
+* the module for which you want to run the tests
+* the list of arguments passed to the test script, as a `Vector{String}`, this will typically be [`Base.ARGS`](https://docs.julialang.org/en/v1/base/constants/#Base.ARGS).
+
+With the `--help` flag you can print a help message:
+
 ```julia
-julia> import Pkg
+julia> using ParallelTestRunner
 
-julia> Pkg.test("ParallelTestRunner"; test_args=["--help"])
-
+julia> ParallelTestRunner.runtests(ParallelTestRunner, ["--help"])
 Usage: runtests.jl [--help] [--list] [--jobs=N] [TESTS...]
 
    --help             Show this text.
    --list             List all available tests.
    --verbose          Print more information during testing.
    --quickfail        Fail the entire run as soon as a single test errored.
-   --jobs=N           Launch `N` processes to perform tests (default: Sys.CPU_THREADS).
+   --jobs=N           Launch `N` processes to perform tests.
 
    Remaining arguments filter the tests that will be executed.
 ```
@@ -68,7 +74,9 @@ runtests(MyModule, ARGS; init_code)
 There are a few packages already using `ParallelTestRunner.jl` to parallelize their tests, you can look at their setups if you need inspiration to move your packages as well:
 
 * [`Enzyme.jl`](https://github.com/EnzymeAD/Enzyme.jl/blob/main/test/runtests.jl)
+* [`GPUArrays.jl`](https://github.com/JuliaGPU/GPUArrays.jl/blob/master/test/runtests.jl)
 * [`GPUCompiler.jl`](https://github.com/JuliaGPU/GPUCompiler.jl/blob/master/test/runtests.jl)
+* [`Metal.jl`](https://github.com/JuliaGPU/Metal.jl/blob/main/test/runtests.jl)
 
 ## Inspiration
 Based on [@maleadt](https://github.com/maleadt) test infrastructure for [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl).
