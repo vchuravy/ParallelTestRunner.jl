@@ -157,7 +157,7 @@ end
 
     io = IOBuffer()
 
-    runtests(ParallelTestRunner, ["--verbose"]; custom_record_init, custom_args=(; say_hello=true), stdout=io, stderr=io)
+    runtests(ParallelTestRunner, ["--verbose"]; custom_record_init, RecordType=CustomTestRecord, custom_args=(; say_hello=true), stdout=io, stderr=io)
     str = String(take!(io))
 
     @test contains(str, r"basic .+ started at")
