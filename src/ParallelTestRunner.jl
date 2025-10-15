@@ -1,6 +1,7 @@
 module ParallelTestRunner
 
 export runtests, addworkers, addworker
+public extract_flag!
 
 using Distributed
 using Dates
@@ -100,7 +101,7 @@ struct TestIOContext
     rss_align::Int
 end
 
-function test_IOContext(::Type{TestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int)
+function test_IOContext(::Type{<:AbstractTestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int)
     elapsed_align = textwidth("Time (s)")
     gc_align = textwidth("GC (s)")
     percent_align = textwidth("GC %")
@@ -115,7 +116,7 @@ function test_IOContext(::Type{TestRecord}, stdout::IO, stderr::IO, lock::Reentr
     )
 end
 
-function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
+function print_header(::Type{<:AbstractTestRecord}, ctx::TestIOContext, testgroupheader, workerheader)
     lock(ctx.lock)
     try
         printstyled(ctx.stdout, " "^(ctx.name_align + textwidth(testgroupheader) - 3), " │ ")
@@ -129,7 +130,7 @@ function print_header(::Type{TestRecord}, ctx::TestIOContext, testgroupheader, w
     end
 end
 
-function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+function print_test_started(::Type{<:AbstractTestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stdout, test, lpad("($wrkr)", ctx.name_align - textwidth(test) + 1, " "), " │", color = :white)
@@ -143,7 +144,7 @@ function print_test_started(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
     end
 end
 
-function print_test_finished(record::TestRecord, wrkr, test, ctx::TestIOContext)
+function print_test_finished(record::AbstractTestRecord, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stdout, test, color = :white)
@@ -158,7 +159,7 @@ function print_test_finished(record::TestRecord, wrkr, test, ctx::TestIOContext)
         alloc_str = @sprintf("%5.2f", record.bytes / 2^20)
         printstyled(ctx.stdout, lpad(alloc_str, ctx.alloc_align, " "), " │ ", color = :white)
 
-        rss_str = @sprintf("%5.2f", record.rss / 2^20)
+        rss_str = @sprintf("%5.2f", memory_usage(record) / 2^20)
         printstyled(ctx.stdout, lpad(rss_str, ctx.rss_align, " "), " │\n", color = :white)
 
         flush(ctx.stdout)
@@ -167,7 +168,7 @@ function print_test_finished(record::TestRecord, wrkr, test, ctx::TestIOContext)
     end
 end
 
-function print_test_failed(record::TestRecord, wrkr, test, ctx::TestIOContext)
+function print_test_failed(record::AbstractTestRecord, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stderr, test, color = :red)
@@ -193,7 +194,7 @@ function print_test_failed(record::TestRecord, wrkr, test, ctx::TestIOContext)
     end
 end
 
-function print_test_crashed(::Type{TestRecord}, wrkr, test, ctx::TestIOContext)
+function print_test_crashed(::Type{<:AbstractTestRecord}, wrkr, test, ctx::TestIOContext)
     lock(ctx.lock)
     try
         printstyled(ctx.stderr, test, color = :red)
@@ -212,9 +213,9 @@ end
 
 #
 # entry point
-#
+# 
 
-function runtest(::Type{TestRecord}, f, name, init_code, color)
+function runtest(::Type{TestRecord}, f, name, init_code, color, custom_args)
     function inner()
         # generate a temporary module to execute the tests in
         mod = @eval(Main, module $(gensym(name)) end)
@@ -466,7 +467,8 @@ Workers are automatically recycled when they exceed memory limits to prevent out
 issues during long test runs. The memory limit is set based on system architecture.
 """
 function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = TestRecord,
-                  custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
+                  custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(), 
+                  custom_record_init = :(), custom_args = (;),
                   test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
     #
     # set-up
@@ -789,8 +791,9 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                 put!(printer_channel, (:started, test, wrkr))
                 result = try
                     Distributed.remotecall_eval(Main, wrkr, :(import ParallelTestRunner))
+                    custom_record_init != :() && Distributed.remotecall_eval(Main, wrkr, custom_record_init)
                     remotecall_fetch(runtest, wrkr, RecordType, test_runners[test], test,
-                                              init_code, io_ctx.color)
+                                              init_code, io_ctx.color, custom_args)
                 catch ex
                     if isa(ex, InterruptException)
                         # the worker got interrupted, signal other tasks to stop

@@ -75,6 +75,97 @@ end
     @test contains(str, "SUCCESS")
 end
 
+@testset "custom testrecord" begin
+    custom_record_init = quote
+        struct CustomTestRecord <: ParallelTestRunner.AbstractTestRecord
+            # TODO: Would it be better to wrap "ParallelTestRunner.TestRecord "
+            value::Any          # AbstractTestSet or TestSetException
+            output::String      # captured stdout/stderr
+
+            # stats
+            time::Float64
+            bytes::UInt64
+            gctime::Float64
+            rss::UInt64
+        end
+        function ParallelTestRunner.memory_usage(rec::CustomTestRecord)
+            return rec.rss
+        end
+        function ParallelTestRunner.test_IOContext(::Type{CustomTestRecord}, args...)
+            return ParallelTestRunner.test_IOContext(ParallelTestRunner.TestRecord, args...)
+        end
+        function ParallelTestRunner.runtest(::Type{CustomTestRecord}, f, name, init_code, color, (; say_hello))
+            function inner()
+                # generate a temporary module to execute the tests in
+                mod = @eval(Main, module $(gensym(name)) end)
+                @eval(mod, import ParallelTestRunner: Test, Random)
+                @eval(mod, using .Test, .Random)
+
+                Core.eval(mod, init_code)
+
+                data = @eval mod begin
+                    GC.gc(true)
+                    Random.seed!(1)
+
+                    mktemp() do path, io
+                        stats = redirect_stdio(stdout=io, stderr=io) do
+                            @timed try
+                                if say_hello
+                                    println("Hello from test '$name'")
+                                end
+                                @testset $name begin
+                                    $f
+                                end
+                            catch err
+                                isa(err, Test.TestSetException) || rethrow()
+
+                                # return the error to package it into a TestRecord
+                                err
+                            end
+                        end
+                        close(io)
+                        output = read(path, String)
+                        (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
+
+                    end
+                end
+
+                # process results
+                rss = Sys.maxrss()
+                record = TestRecord(data..., rss)
+
+                GC.gc(true)
+                return record
+            end
+
+            @static if VERSION >= v"1.13.0-DEV.1044"
+                @with Test.TESTSET_PRINT_ENABLE => false begin
+                    inner()
+                end
+            else
+                old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+                Test.TESTSET_PRINT_ENABLE[] = false
+                try
+                    inner()
+                finally
+                    Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+                end
+            end
+        end
+    end # quote
+    eval(custom_record_init)
+
+    io = IOBuffer()
+
+    runtests(ParallelTestRunner, ["--verbose"]; custom_record_init, custom_args=(; say_hello=true), stdout=io, stderr=io)
+    str = String(take!(io))
+
+    @test contains(str, r"basic .+ started at")
+    @test contains(str, r"Hello from test 'basic'")
+    @test contains(str, "SUCCESS")
+end
+
+
 @testset "failing test" begin
     custom_tests = Dict(
         "failing test" => quote
