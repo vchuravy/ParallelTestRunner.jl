@@ -378,7 +378,6 @@ end
 # Map PIDs to logical worker IDs
 # Malt doesn't have a global worker ID, and PID make printing ugly
 const WORKER_IDS = Dict{Int32, Int32}()
-
 worker_id(wrkr) = WORKER_IDS[wrkr.proc_pid]
 
 """
@@ -386,7 +385,8 @@ worker_id(wrkr) = WORKER_IDS[wrkr.proc_pid]
 
 Add `X` worker processes.
 """
-function addworkers(X; env=Vector{Pair{String, String}}())
+addworkers(X; kwargs...) = [addworker(; kwargs...) for _ in 1:X]
+function addworker(; env=Vector{Pair{String, String}}())
     exe = test_exe()
     exeflags = exe[2:end]
 
@@ -394,20 +394,9 @@ function addworkers(X; env=Vector{Pair{String, String}}())
     # Malt already sets OPENBLAS_NUM_THREADS to 1
     push!(env, "OPENBLAS_NUM_THREADS" => "1")
 
-    workers = Malt.Worker[]
-    for _ in 1:X
-        wrkr = Malt.Worker(;exeflags, env)
-        WORKER_IDS[wrkr.proc_pid] = length(WORKER_IDS) + 1
-        push!(workers, wrkr)
-    end
-    return workers
-end
-addworker(; kwargs...) = addworkers(1; kwargs...)[1]
-
-function recycle_worker(w::Malt.Worker)
-    Malt.stop(w; exit_timeout = 15.0, term_timeout = 15.0)
-
-    return nothing
+    wrkr = Malt.Worker(;exeflags, env)
+    WORKER_IDS[wrkr.proc_pid] = length(WORKER_IDS) + 1
+    return wrkr
 end
 
 """
@@ -780,7 +769,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         push!(worker_tasks, @async begin
             while !done
                 # if a worker failed, spawn a new one
-                if p === nothing
+                if !Malt.isrunning(p)
                     p = addworker()
                 end
 
@@ -822,7 +811,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     if memory_usage(result) > max_worker_rss
                         # the worker has reached the max-rss limit, recycle it
                         # so future tests start with a smaller working set
-                        p = recycle_worker(p)
+                        Malt.stop(wrkr)
                     end
                 else
                     @assert result isa Exception
@@ -832,12 +821,12 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     end
 
                     # the worker encountered some serious failure, recycle it
-                    p = recycle_worker(p)
+                    Malt.stop(wrkr)
                 end
 
                 # get rid of the custom worker
                 if wrkr != p
-                    recycle_worker(wrkr)
+                    Malt.stop(wrkr)
                 end
 
                 delete!(running_tests, test)
