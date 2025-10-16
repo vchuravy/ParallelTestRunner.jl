@@ -127,14 +127,10 @@ end
         end
     )
 
-    print("""NOTE: The next test is expected to crash a worker process,
-                   which may print some output to the terminal.
-             """)
     io = IOBuffer()
     @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
         runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
     end
-    println()
 
     str = String(take!(io))
     @test contains(str, r"abort .+ started at")

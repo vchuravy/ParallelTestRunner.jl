@@ -615,11 +615,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     workerheader = "(Worker)"
     name_align = maximum(
         [
-            textwidth(testgroupheader) + textwidth(" ") +
-                textwidth(workerheader); map(
-                x -> textwidth(x) +
-                    3 + ndigits(nworkers), tests
-            )
+            textwidth(testgroupheader) + textwidth(" ") + textwidth(workerheader);
+            map(x -> textwidth(x) + 5, tests)
         ]
     )
 
