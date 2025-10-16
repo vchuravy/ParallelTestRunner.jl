@@ -222,6 +222,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
         mod = @eval(Main, module $(gensym(name)) end)
         @eval(mod, import ParallelTestRunner: Test, Random, RemoteTestSets)
         @eval(mod, using .Test, .Random, .RemoteTestSets)
+        @eval(mod, using .Test: DefaultTestSet) # Necessary because VERSION <= v"1.10.0-" does not support unexported TestSets the @testset
 
         Core.eval(mod, init_code)
 

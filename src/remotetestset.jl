@@ -3,7 +3,7 @@ module RemoteTestSets
 export RemoteTestSet, @remote_testset
 
 import Test
-import Test: AbstractTestSet, DefaultTestSet, Broken, Pass, Fail, Error
+import Test: AbstractTestSet, DefaultTestSet, Broken, Pass, Fail, Error, @testset
 
 struct RemoteTestSet <: AbstractTestSet
     ts::DefaultTestSet
@@ -73,27 +73,13 @@ macro remote_testset(args...)
     end
 
     source = args[end]
-    if isnothing(testsettype)
-        testsettype = :(Test.DefaultTestSet)
-    end
+    testsettype = isnothing(testsettype) ? :(DefaultTestSet) : testsettype
 
-    # Build the inner @testset call
-    inner_testset = Expr(:macrocall,
-                         :(Test.var"@testset"),
-                         LineNumberNode(@__LINE__, @__FILE__),
-                         testsettype,
-                         otherargs...,
-                         source)
-
-    # Build the outer @testset call with RemoteTestSet
-    outer_testset = Expr(:macrocall,
-                         :(Test.var"@testset"),
-                         LineNumberNode(@__LINE__, @__FILE__),
-                         :RemoteTestSet,
-                         "wrapper",
-                         Expr(:block, inner_testset))
-
-    return esc(outer_testset)
+    return esc(quote
+        @testset RemoteTestSet "wrapper" begin
+            @testset $testsettype $(otherargs...) $source
+        end
+    end)
 end
 
 end
