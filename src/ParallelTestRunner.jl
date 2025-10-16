@@ -1,7 +1,9 @@
 module ParallelTestRunner
 
 export runtests, addworkers, addworker
-# public extract_flag!
+if VERSION >= v"1.11.0-DEV.469"
+    eval(Meta.parse("public extract_flag!"))
+end
 
 using Distributed
 using Dates
@@ -215,56 +217,55 @@ end
 # entry point
 # 
 
-function runtest(::Type{TestRecord}, f, name, init_code, color, custom_args)
-    function inner()
-        # generate a temporary module to execute the tests in
-        mod = @eval(Main, module $(gensym(name)) end)
-        @eval(mod, import ParallelTestRunner: Test, Random)
-        @eval(mod, using .Test, .Random)
-
-        Core.eval(mod, init_code)
-
-        data = @eval mod begin
-            GC.gc(true)
-            Random.seed!(1)
-
-            mktemp() do path, io
-                stats = redirect_stdio(stdout=io, stderr=io) do
-                    @timed try
-                        @testset $name begin
-                            $f
-                        end
-                    catch err
-                        isa(err, Test.TestSetException) || rethrow()
-
-                        # return the error to package it into a TestRecord
-                        err
-                    end
-                end
-                close(io)
-                output = read(path, String)
-                (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
-
-            end
-        end
-
-        # process results
-        rss = Sys.maxrss()
-        record = TestRecord(data..., rss)
-
+function execute(::Type{TestRecord}, mod, f, name, color, custom_args)::TestRecord
+    data = @eval mod begin
         GC.gc(true)
-        return record
+        Random.seed!(1)
+
+        mktemp() do path, io
+            stats = redirect_stdio(stdout=io, stderr=io) do
+                @timed try
+                    @testset $name begin
+                        $f
+                    end
+                catch err
+                    isa(err, Test.TestSetException) || rethrow()
+
+                    # return the error to package it into a TestRecord
+                    err
+                end
+            end
+            close(io)
+            output = read(path, String)
+            (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
+        end
     end
+
+    # process results
+    rss = Sys.maxrss()
+    record = TestRecord(data..., rss)
+
+    GC.gc(true)
+    return record
+end
+
+function runtest(RecordType::Type{<:AbstractTestRecord}, f, name, init_code, color, custom_args)
+    # generate a temporary module to execute the tests in
+    mod = Core.eval(Main, Expr(:module, true, gensym(name), Expr(:block)))
+    @eval(mod, import ParallelTestRunner: Test, Random)
+    @eval(mod, using .Test, .Random)
+
+    Core.eval(mod, init_code)
 
     @static if VERSION >= v"1.13.0-DEV.1044"
         @with Test.TESTSET_PRINT_ENABLE => false begin
-            inner()
+            execute(RecordType, mod, f, name, color, custom_args)
         end
     else
         old_print_setting = Test.TESTSET_PRINT_ENABLE[]
         Test.TESTSET_PRINT_ENABLE[] = false
         try
-            inner()
+            execute(RecordType, mod, f, name, color, custom_args)
         finally
             Test.TESTSET_PRINT_ENABLE[] = old_print_setting
         end

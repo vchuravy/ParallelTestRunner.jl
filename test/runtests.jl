@@ -95,64 +95,41 @@ end
         function ParallelTestRunner.test_IOContext(::Type{CustomTestRecord}, stdout::IO, stderr::IO, lock::ReentrantLock, name_align::Int64)
             return ParallelTestRunner.test_IOContext(ParallelTestRunner.TestRecord, stdout, stderr, lock, name_align)
         end
-        function ParallelTestRunner.runtest(::Type{CustomTestRecord}, f, name, init_code, color, (; say_hello))
-            function inner()
-                # generate a temporary module to execute the tests in
-                mod = Core.eval(Main, Expr(:module, true,  gensym(name), Expr(:block)))
-                @eval(mod, import ParallelTestRunner: Test, Random)
-                @eval(mod, using .Test, .Random)
-
-                Core.eval(mod, init_code)
-
-                data = @eval mod begin
-                    GC.gc(true)
-                    Random.seed!(1)
-
-                    mktemp() do path, io
-                        stats = redirect_stdio(stdout=io, stderr=io) do
-                            @timed try
-                                # Since we are in a double quote we need to use this form to escape `$`
-                                if $(Expr(:$, :say_hello))
-                                    println("Hello from test '" * $(Expr(:$, :name)) * "'")
-                                end
-                                @testset $(Expr(:$, :name)) begin
-                                    $(Expr(:$, :f))
-                                end
-                            catch err
-                                isa(err, Test.TestSetException) || rethrow()
-
-                                # return the error to package it into a TestRecord
-                                err
-                            end
-                        end
-                        close(io)
-                        output = read(path, String)
-                        (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
-
-                    end
-                end
-
-                # process results
-                rss = Sys.maxrss()
-                record = CustomTestRecord(data..., rss)
-
+        function ParallelTestRunner.execute(::Type{CustomTestRecord}, mod, f, name, color, (; say_hello))
+            data = @eval mod begin
                 GC.gc(true)
-                return record
+                Random.seed!(1)
+
+                mktemp() do path, io
+                    stats = redirect_stdio(stdout=io, stderr=io) do
+                        @timed try
+                            # Since we are in a double quote we need to use this form to escape `$`
+                            if $(Expr(:$, :say_hello))
+                                println("Hello from test '" * $(Expr(:$, :name)) * "'")
+                            end
+                            @testset $(Expr(:$, :name)) begin
+                                $(Expr(:$, :f))
+                            end
+                        catch err
+                            isa(err, Test.TestSetException) || rethrow()
+
+                            # return the error to package it into a TestRecord
+                            err
+                        end
+                    end
+                    close(io)
+                    output = read(path, String)
+                    (; testset=stats.value, output, stats.time, stats.bytes, stats.gctime)
+
+                end
             end
 
-            @static if VERSION >= v"1.13.0-DEV.1044"
-                @with Test.TESTSET_PRINT_ENABLE => false begin
-                    inner()
-                end
-            else
-                old_print_setting = Test.TESTSET_PRINT_ENABLE[]
-                Test.TESTSET_PRINT_ENABLE[] = false
-                try
-                    inner()
-                finally
-                    Test.TESTSET_PRINT_ENABLE[] = old_print_setting
-                end
-            end
+            # process results
+            rss = Sys.maxrss()
+            record = CustomTestRecord(data..., rss)
+
+            GC.gc(true)
+            return record
         end
     end # quote
     eval(custom_record_init)
