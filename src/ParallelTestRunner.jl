@@ -220,9 +220,8 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod = @eval(Main, module $(gensym(name)) end)
-        @eval(mod, import ParallelTestRunner: Test, Random, RemoteTestSet)
-        @eval(mod, using .Test, .Random)
-        @eval(mod, using .Test: DefaultTestSet) # Necessary because VERSION <= v"1.10.0-" does not support unexported TestSets the @testset
+        @eval(mod, import ParallelTestRunner: Test, Random, RemoteTestSets)
+        @eval(mod, using .Test, .Random, .RemoteTestSets)
 
         Core.eval(mod, init_code)
 
@@ -233,10 +232,8 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
                     @timed try
-                        @testset RemoteTestSet "wrapper" begin
-                            @testset DefaultTestSet $name begin
-                                $f
-                            end
+                        @remote_testset $name begin
+                            $f
                         end
                     catch err
                         isa(err, Test.TestSetException) || rethrow()

@@ -60,4 +60,40 @@ end
     Test.anynonpass(ts::RemoteTestSet) = Test.anynonpass(ts.ts)
 end
 
+macro remote_testset(args...)
+    testsettype = nothing
+    otherargs = []
+
+    for arg in args[1:end-1]
+        if isa(arg, Symbol) || Base.isexpr(arg, :.)
+            testsettype = arg
+        else
+            push!(otherargs, arg)
+        end
+    end
+
+    source = args[end]
+    if isnothing(testsettype)
+        testsettype = :(Test.DefaultTestSet)
+    end
+
+    # Build the inner @testset call
+    inner_testset = Expr(:macrocall,
+                         :(Test.var"@testset"),
+                         LineNumberNode(@__LINE__, @__FILE__),
+                         testsettype,
+                         otherargs...,
+                         source)
+
+    # Build the outer @testset call with RemoteTestSet
+    outer_testset = Expr(:macrocall,
+                         :(Test.var"@testset"),
+                         LineNumberNode(@__LINE__, @__FILE__),
+                         :RemoteTestSet,
+                         "wrapper",
+                         Expr(:block, inner_testset))
+
+    return esc(outer_testset)
+end
+
 end
