@@ -13,6 +13,8 @@ import Test
 import Random
 import IOCapture
 
+include("remotetestset.jl")
+
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
     const JULIA_TEST_MAXRSS_MB = 3800
@@ -218,8 +220,9 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod = @eval(Main, module $(gensym(name)) end)
-        @eval(mod, import ParallelTestRunner: Test, Random)
+        @eval(mod, import ParallelTestRunner: Test, Random, RemoteTestSet)
         @eval(mod, using .Test, .Random)
+        @eval(mod, using .Test: DefaultTestSet) # Necessary because VERSION <= v"1.10.0-" does not support unexported TestSets the @testset
 
         Core.eval(mod, init_code)
 
@@ -230,8 +233,10 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
                     @timed try
-                        @testset $name begin
-                            $f
+                        @testset RemoteTestSet "wrapper" begin
+                            @testset DefaultTestSet $name begin
+                                $f
+                            end
                         end
                     catch err
                         isa(err, Test.TestSetException) || rethrow()
@@ -397,6 +402,15 @@ function addworker(; env=Vector{Pair{String, String}}())
     wrkr = Malt.Worker(;exeflags, env)
     WORKER_IDS[wrkr.proc_pid] = length(WORKER_IDS) + 1
     return wrkr
+end
+
+@static if VERSION >= v"1.13.0-DEV.1037"
+    compat_anynonpass(ts::Test.AbstractTestSet) = Test.anynonpass(ts)
+else
+    function compat_anynonpass(ts::Test.AbstractTestSet)
+        Test.get_test_counts(ts)
+        return ts.anynonpass
+    end
 end
 
 """
@@ -719,7 +733,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        if record.value isa Exception
+                        if compat_anynonpass(record.value)
                             print_test_failed(record, wrkr, test_name, io_ctx)
                         else
                             print_test_finished(record, wrkr, test_name, io_ctx)
@@ -766,7 +780,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
 
     worker_tasks = Task[]
     for p in workers
-        push!(worker_tasks, @async begin
+    push!(worker_tasks, @async begin
             while !done
                 # if a worker failed, spawn a new one
                 if !Malt.isrunning(p)
@@ -1003,8 +1017,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         end
         print(io_ctx.stdout, c.output)
     end
-    if (VERSION >= v"1.13.0-DEV.1037" && !Test.anynonpass(o_ts)) ||
-            (VERSION < v"1.13.0-DEV.1037" && !o_ts.anynonpass)
+    if !compat_anynonpass(o_ts)
         println(io_ctx.stdout, "    \033[32;1mSUCCESS\033[0m")
     else
         println(io_ctx.stderr, "    \033[31;1mFAILURE\033[0m\n")
