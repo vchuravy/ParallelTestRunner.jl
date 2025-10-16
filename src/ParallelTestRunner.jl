@@ -513,8 +513,9 @@ Workers are automatically recycled when they exceed memory limits to prevent out
 issues during long test runs. The memory limit is set based on system architecture.
 """
 function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = TestRecord,
-                  custom_tests::Dict{String, Expr}=Dict{String, Expr}(), init_code = :(),
-                  test_worker = Returns(nothing), stdout = Base.stdout, stderr = Base.stderr)
+                  custom_tests::Dict{String, Expr} = Dict{String, Expr}(), test_transform = (test, expr) -> expr,
+                  init_code = :(), test_worker = Returns(nothing),
+                  stdout = Base.stdout, stderr = Base.stderr)
     #
     # set-up
     #
@@ -583,9 +584,10 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
 
         append!(tests, files)
         for file in files
-            test_runners[file] = quote
+            expr = quote
                 include($(joinpath(WORKDIR, file * ".jl")))
             end
+            test_runners[file] = test_transform(file, expr)
         end
     end
     ## finalize
@@ -620,7 +622,6 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
     jobs = clamp(jobs, 1, length(tests))
     println(stdout, "Running $jobs tests in parallel. If this is too many, specify the `--jobs=N` argument to the tests, or set the `JULIA_CPU_THREADS` environment variable.")
     workers = addworkers(min(jobs, length(tests)))
-    nworkers = length(workers)
 
     t0 = time()
     results = []
