@@ -264,7 +264,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
         mod = @eval(Main, module $(gensym(name)) end)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
-        # Both bindings must be imported since `@testset` can't handle fully-qualified names.
+        # Both bindings must be imported since `@testset` can't handle fully-qualified names when VERSION < v"1.11.0-DEV.1518".
         @eval(mod, import ParallelTestRunner: WorkerTestSet)
         @eval(mod, import Test: DefaultTestSet)
 
