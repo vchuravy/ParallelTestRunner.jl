@@ -982,9 +982,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     testset = result[]::DefaultTestSet
                     historical_durations[testname] = stop - start
                 else
-                    # If this test raised an exception that is not a remote testset
-                    # exception, that means the test runner itself had some problem, so we
-                    # may have hit a segfault, deserialization errors or something similar.
+                    # If this test raised an exception that means the test runner itself had some problem,
+                    # so we may have hit a segfault, deserialization errors or something similar.
                     # Record this testset as Errored.
                     # One of Malt.TerminatedWorkerException, Malt.RemoteException, or ErrorException
                     @assert result isa Exception
