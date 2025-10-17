@@ -32,11 +32,11 @@ Test.record(ts::RemoteTestSet, t::AbstractTestSet) = Test.record(ts.ts, t)
 
 # This is the single method that needs changing
 function Test.finish(ts::RemoteTestSet; print_results::Bool=Test.TESTSET_PRINT_ENABLE[])
-    if Test.get_testset_depth() != 0
-        throw(ErrorException("RemoteTestSet should only ever be a top-level TestSet"))
-    end
+    # This testset is just a placeholder,
+    #   so it must be the top-most
+    @assert Test.get_testset_depth() == 0
 
-    # Otherwise, just return the testset so it is returned from the @testset macro
+    # There should only ever be one child testset
     return only(ts.ts.results)
 end
 
