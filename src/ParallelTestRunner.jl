@@ -214,12 +214,34 @@ end
 # entry point
 #
 
+struct WorkerTestSet <: Test.AbstractTestSet
+    name::String
+    results_lock::ReentrantLock
+    results::Vector{Any}
+end
+function WorkerTestSet(desc::AbstractString)
+    return WorkerTestSet(desc, ReentrantLock(), Vector{Any}())
+end
+
+function Test.record(ts::WorkerTestSet, res)
+    @lock ts.results_lock push!(ts.results, res)
+    return nothing
+end
+
+function Test.finish(ts::WorkerTestSet)
+    # This testset is just a placeholder,
+    # so it must be the top-most
+    @assert Test.get_testset_depth() == 0
+    return ts
+end
+
 function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
         # generate a temporary module to execute the tests in
         mod = @eval(Main, module $(gensym(name)) end)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
+        @eval(mod, import ParallelTestRunner: WorkerTestSet)
 
         Core.eval(mod, init_code)
 
@@ -230,10 +252,11 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
                     @timed try
-                        @testset $name begin
+                        @testset WorkerTestSet $name begin
                             $f
                         end
                     catch err
+                        # TODO: Should never receive a TestSetException here
                         isa(err, Test.TestSetException) || rethrow()
 
                         # return the error to package it into a TestRecord
@@ -722,6 +745,8 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         if record.value isa Exception
                             print_test_failed(record, wrkr, test_name, io_ctx)
                         else
+                            # TODO: Handle WorkerTestSet to print
+                            # failed at
                             print_test_finished(record, wrkr, test_name, io_ctx)
                         end
 
@@ -934,10 +959,18 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
 
                 # decode or fake a testset
                 if result isa AbstractTestRecord
-                    if result.value isa Test.AbstractTestSet
+                    if result.value isa WorkerTestSet
+                        testset = create_testset(testname; start, stop)
+                        historical_durations[testname] = stop - start
+                        for res in result.value.results
+                            Test.record(testset, res)
+                        end
+                    elseif result.value isa Test.AbstractTestSet
+                        @assert false
                         testset = result.value
                         historical_durations[testname] = stop - start
                     else
+                        @assert false
                         # TODO: improve the Test stdlib to keep track of the exact failure
                         #       instead of flattening into an exception without provenance
                         @assert result.value isa Test.TestSetException
@@ -959,6 +992,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                     # Record this testset as Errored.
                     @assert result isa Exception
                     testset = create_testset(testname; start, stop)
+                    # TODO: Send backtrace with Exception
                     Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
                 end
 
