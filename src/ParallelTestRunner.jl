@@ -242,6 +242,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
         @eval(mod, import ParallelTestRunner: WorkerTestSet)
+        @eval(mod, import Test: .DefaultTestSet)
 
         Core.eval(mod, init_code)
 
@@ -252,8 +253,10 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
                     @timed try
-                        @testset WorkerTestSet $name begin
-                            $f
+                        @testset WorkerTestSet "placeholder" begin
+                            @testset DefaultTestSet $name begin
+                                $f
+                            end
                         end
                     catch err
                         # TODO: Should never receive a TestSetException here
