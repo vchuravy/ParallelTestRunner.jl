@@ -13,6 +13,16 @@ import Test
 import Random
 import IOCapture
 
+function anynonpass(ts::Test.AbstractTestSet)
+    @static if VERSION >= v"1.13.0-DEV.1037"
+        return Test.anynonpass(ts)
+    else
+        Test.get_test_counts(ts)
+        return ts.anynonpass
+    end
+end
+
+
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
     const JULIA_TEST_MAXRSS_MB = 3800
@@ -214,17 +224,18 @@ end
 # entry point
 #
 
-struct WorkerTestSet <: Test.AbstractTestSet
-    name::String
-    results_lock::ReentrantLock
-    results::Vector{Any}
-end
-function WorkerTestSet(desc::AbstractString)
-    return WorkerTestSet(desc, ReentrantLock(), Vector{Any}())
+mutable struct WorkerTestSet <: Test.AbstractTestSet
+    const name::String
+    wrapped_ts::Test.DefaultTestSet
+    function WorkerTestSet(name::AbstractString)
+        new(name)
+    end
 end
 
 function Test.record(ts::WorkerTestSet, res)
-    @lock ts.results_lock push!(ts.results, res)
+    @assert res isa Test.DefaultTestSet
+    @assert !isdefined(ts, :wrapped_ts)
+    ts.wrapped_ts = res
     return nothing
 end
 
@@ -232,8 +243,11 @@ function Test.finish(ts::WorkerTestSet)
     # This testset is just a placeholder,
     # so it must be the top-most
     @assert Test.get_testset_depth() == 0
+    @assert isdefined(ts, :wrapped_ts)
     return ts
 end
+
+anynonpass(ts::WorkerTestSet) = anynonpass(ts.wrapped_ts)
 
 function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
@@ -748,9 +762,12 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         if record.value isa Exception
                             print_test_failed(record, wrkr, test_name, io_ctx)
                         else
-                            # TODO: Handle WorkerTestSet to print
-                            # failed at
-                            print_test_finished(record, wrkr, test_name, io_ctx)
+                            ts = record.value::WorkerTestSet
+                            if anynonpass(ts)
+                                print_test_failed(record, wrkr, test_name, io_ctx)
+                            else
+                                print_test_finished(record, wrkr, test_name, io_ctx)
+                            end
                         end
 
                     elseif msg_type == :crashed
@@ -1040,8 +1057,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
         end
         print(io_ctx.stdout, c.output)
     end
-    if (VERSION >= v"1.13.0-DEV.1037" && !Test.anynonpass(o_ts)) ||
-            (VERSION < v"1.13.0-DEV.1037" && !o_ts.anynonpass)
+    if !anynonpass(o_ts)
         println(io_ctx.stdout, "    \033[32;1mSUCCESS\033[0m")
     else
         println(io_ctx.stderr, "    \033[31;1mFAILURE\033[0m\n")
