@@ -97,6 +97,36 @@ end
     @test contains(str, "1 == 2")
 end
 
+@testset "nested failure" begin
+    custom_tests = Dict(
+        "nested" => quote
+            @test true
+            @testset "foo" begin
+                @test true
+                @testset "bar" begin
+                    @test false
+                end
+            end
+        end
+    )
+    error_line = @__LINE__() - 5
+
+    io = IOBuffer()
+    @test_throws Test.FallbackTestSetException("Test run finished with errors") begin
+        runtests(ParallelTestRunner, ["--verbose"]; custom_tests, stdout=io, stderr=io)
+    end
+
+    str = String(take!(io))
+    @test contains(str, r"nested .+ started at")
+    @test contains(str, r"nested .+ failed at")
+    @test contains(str, r"nested .+ \| .+ 2 .+ 1 .+ 3")
+    @test contains(str, r"foo .+ \| .+ 1 .+ 1 .+ 2")
+    @test contains(str, r"bar .+ \| .+ 1 .+ 1")
+    @test contains(str, "FAILURE")
+    @test contains(str, "Error in testset bar")
+    @test contains(str, "$(basename(@__FILE__)):$error_line")
+end
+
 @testset "throwing test" begin
     custom_tests = Dict(
         "throwing test" => quote
