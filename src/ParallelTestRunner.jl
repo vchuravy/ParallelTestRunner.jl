@@ -78,7 +78,7 @@ end
 abstract type AbstractTestRecord end
 
 struct TestRecord <: AbstractTestRecord
-    value::DefaultTestSet
+    testset::DefaultTestSet
     output::String      # captured stdout/stderr
 
     # stats
@@ -90,10 +90,6 @@ end
 
 function memory_usage(rec::TestRecord)
     return rec.rss
-end
-
-function Base.getindex(rec::TestRecord)
-    return rec.value
 end
 
 
@@ -764,7 +760,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        if anynonpass(record[])
+                        if anynonpass(record.testset)
                             print_test_failed(record, wrkr, test_name, io_ctx)
                         else
                             print_test_finished(record, wrkr, test_name, io_ctx)
@@ -979,7 +975,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                 push!(completed_tests, testname)
 
                 if result isa AbstractTestRecord
-                    testset = result[]::DefaultTestSet
+                    testset = result.testset
                     historical_durations[testname] = stop - start
                 else
                     # If this test raised an exception that means the test runner itself had some problem,
