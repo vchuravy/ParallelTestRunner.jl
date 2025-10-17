@@ -12,6 +12,7 @@ using Serialization
 import Test
 import Random
 import IOCapture
+import Test: DefaultTestSet
 
 function anynonpass(ts::Test.AbstractTestSet)
     @static if VERSION >= v"1.13.0-DEV.1037"
@@ -21,7 +22,6 @@ function anynonpass(ts::Test.AbstractTestSet)
         return ts.anynonpass
     end
 end
-
 
 #Always set the max rss so that if tests add large global variables (which they do) we don't make the GC's life too hard
 if Sys.WORD_SIZE == 64
@@ -78,7 +78,7 @@ end
 abstract type AbstractTestRecord end
 
 struct TestRecord <: AbstractTestRecord
-    value::Any          # AbstractTestSet or TestSetException
+    value::DefaultTestSet
     output::String      # captured stdout/stderr
 
     # stats
@@ -90,6 +90,10 @@ end
 
 function memory_usage(rec::TestRecord)
     return rec.rss
+end
+
+function Base.getindex(rec::TestRecord)
+    return rec.value
 end
 
 
@@ -223,7 +227,14 @@ end
 #
 # entry point
 #
+"""
+    WorkerTestSet
 
+A test set wrapper used internally by worker processes.
+`Base.DefaultTestSet` detects when it is the top-most and throws
+a `TestSetException` containing very little information. By inserting this
+wrapper as the top-most test set, we can capture the full results.
+"""
 mutable struct WorkerTestSet <: Test.AbstractTestSet
     const name::String
     wrapped_ts::Test.DefaultTestSet
@@ -240,14 +251,12 @@ function Test.record(ts::WorkerTestSet, res)
 end
 
 function Test.finish(ts::WorkerTestSet)
-    # This testset is just a placeholder,
-    # so it must be the top-most
+    # This testset is just a placeholder so it must be the top-most
     @assert Test.get_testset_depth() == 0
     @assert isdefined(ts, :wrapped_ts)
-    return ts
+    # Return the wrapped_ts so that we don't need to handle WorkerTestSet anywhere else
+    return ts.wrapped_ts
 end
-
-anynonpass(ts::WorkerTestSet) = anynonpass(ts.wrapped_ts)
 
 function runtest(::Type{TestRecord}, f, name, init_code, color)
     function inner()
@@ -255,6 +264,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
         mod = @eval(Main, module $(gensym(name)) end)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
+        # Both bindings must be imported since `@testset` can't handle fully-qualified names.
         @eval(mod, import ParallelTestRunner: WorkerTestSet)
         @eval(mod, import Test: DefaultTestSet)
 
@@ -266,18 +276,13 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
 
             mktemp() do path, io
                 stats = redirect_stdio(stdout=io, stderr=io) do
-                    @timed try
-                        @testset WorkerTestSet "placeholder" begin
-                            @testset DefaultTestSet $name begin
-                                $f
-                            end
+                    # @testset CustomTestRecord switches the all lower-level testset to our custom testset,
+                    # so we need to have two layers here such that the user-defined testsets are using `DefaultTestSet`.
+                    # This also guarantees our invariant about `WorkerTestSet` containing a single `DefaultTestSet`.
+                    @timed @testset WorkerTestSet "placeholder" begin
+                        @testset DefaultTestSet $name begin
+                            $f
                         end
-                    catch err
-                        # TODO: Should never receive a TestSetException here
-                        isa(err, Test.TestSetException) || rethrow()
-
-                        # return the error to package it into a TestRecord
-                        err
                     end
                 end
                 close(io)
@@ -759,15 +764,10 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         test_name, wrkr, record = msg[2], msg[3], msg[4]
 
                         clear_status()
-                        if record.value isa Exception
+                        if anynonpass(record[])
                             print_test_failed(record, wrkr, test_name, io_ctx)
                         else
-                            ts = record.value::WorkerTestSet
-                            if anynonpass(ts)
-                                print_test_failed(record, wrkr, test_name, io_ctx)
-                            else
-                                print_test_finished(record, wrkr, test_name, io_ctx)
-                            end
+                            print_test_finished(record, wrkr, test_name, io_ctx)
                         end
 
                     elseif msg_type == :crashed
@@ -859,6 +859,7 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
                         Malt.stop(wrkr)
                     end
                 else
+                    # One of Malt.TerminatedWorkerException, Malt.RemoteException, or ErrorException
                     @assert result isa Exception
                     put!(printer_channel, (:crashed, test, worker_id(wrkr)))
                     if do_quickfail
@@ -977,19 +978,17 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
             for (testname, result, start, stop) in results
                 push!(completed_tests, testname)
 
-                # decode testset
                 if result isa AbstractTestRecord
-                    @assert result.value isa WorkerTestSet
-                    testset = result.value.wrapped_ts
+                    testset = result[]::DefaultTestSet
                     historical_durations[testname] = stop - start
                 else
                     # If this test raised an exception that is not a remote testset
                     # exception, that means the test runner itself had some problem, so we
                     # may have hit a segfault, deserialization errors or something similar.
                     # Record this testset as Errored.
+                    # One of Malt.TerminatedWorkerException, Malt.RemoteException, or ErrorException
                     @assert result isa Exception
                     testset = create_testset(testname; start, stop)
-                    # TODO: Send backtrace with Exception
                     Test.record(testset, Test.Error(:nontest_error, testname, nothing, Base.ExceptionStack(NamedTuple[(;exception = result, backtrace = [])]), LineNumberNode(1)))
                 end
 
