@@ -977,34 +977,11 @@ function runtests(mod::Module, ARGS; test_filter = Returns(true), RecordType = T
             for (testname, result, start, stop) in results
                 push!(completed_tests, testname)
 
-                # decode or fake a testset
+                # decode testset
                 if result isa AbstractTestRecord
-                    if result.value isa WorkerTestSet
-                        testset = create_testset(testname; start, stop)
-                        historical_durations[testname] = stop - start
-                        for res in result.value.results
-                            Test.record(testset, res)
-                        end
-                    elseif result.value isa Test.AbstractTestSet
-                        @assert false
-                        testset = result.value
-                        historical_durations[testname] = stop - start
-                    else
-                        @assert false
-                        # TODO: improve the Test stdlib to keep track of the exact failure
-                        #       instead of flattening into an exception without provenance
-                        @assert result.value isa Test.TestSetException
-                        testset = create_testset(testname; start, stop)
-                        for i in 1:result.value.pass
-                            Test.record(testset, Test.Pass(:test, nothing, nothing, nothing, LineNumberNode(@__LINE__, @__FILE__)))
-                        end
-                        for i in 1:result.value.broken
-                            Test.record(testset, Test.Broken(:test, nothing))
-                        end
-                        for t in result.value.errors_and_fails
-                            Test.record(testset, t)
-                        end
-                    end
+                    @assert result.value isa WorkerTestSet
+                    testset = result.value.wrapped_ts
+                    historical_durations[testname] = stop - start
                 else
                     # If this test raised an exception that is not a remote testset
                     # exception, that means the test runner itself had some problem, so we
