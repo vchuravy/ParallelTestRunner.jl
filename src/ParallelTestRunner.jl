@@ -242,7 +242,7 @@ function runtest(::Type{TestRecord}, f, name, init_code, color)
         @eval(mod, import ParallelTestRunner: Test, Random)
         @eval(mod, using .Test, .Random)
         @eval(mod, import ParallelTestRunner: WorkerTestSet)
-        @eval(mod, import Test: .DefaultTestSet)
+        @eval(mod, import Test: DefaultTestSet)
 
         Core.eval(mod, init_code)
 
