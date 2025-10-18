@@ -445,41 +445,14 @@ function addworker(; env=Vector{Pair{String, String}}())
 end
 
 """
-    find_tests([f], dir::String) -> Dict{String, Expr}
+    find_tests(dir::String) -> Dict{String, Expr}
 
 Discover test files in a directory and return a test suite dictionary.
 
 Walks through `dir` and finds all `.jl` files (excluding `runtests.jl`), returning a
-dictionary mapping test names to expressions that run those tests.
-
-## Arguments
-
-- `f`: Optional function that takes a file path and returns an expression to execute
-  (default: `path -> :(include(\$path))`)
-- `dir`: Directory to search for test files
-
-## Returns
-
-A `Dict{String, Expr}` where keys are test names (file paths relative to `dir` with
-`.jl` extension removed and path separators normalized to `/`) and values are expressions
-to execute for each test.
-
-## Examples
-
-```julia
-# Auto-discover tests with default include behavior
-testsuite = find_tests(pwd())
-
-# Custom expression for each test file
-testsuite = find_tests(pwd()) do path
-    quote
-        @info "Running test: \$path"
-        include(\$path)
-    end
-end
-```
+dictionary mapping test names to expression that include each test file.
 """
-function find_tests(f, dir::String)
+function find_tests(dir::String)
     tests = Dict{String, Expr}()
     for (rootpath, dirs, files) in walkdir(dir)
         # find Julia files
@@ -508,13 +481,10 @@ function find_tests(f, dir::String)
 
         for file in files
             path = joinpath(rootpath, file * ".jl")
-            tests[file] = f(path)
+            tests[file] = :(include($path))
         end
     end
     return tests
-end
-find_tests(dir::String) = find_tests(dir) do path
-    :(include($path))
 end
 
 """
